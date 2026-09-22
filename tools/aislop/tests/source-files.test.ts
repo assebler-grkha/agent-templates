@@ -1,0 +1,423 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { discoverProject } from "../src/utils/discover.js";
+import {
+	filterProjectFiles,
+	filterTestFiles,
+	getProjectSourceFiles,
+	getSourceFilesForRoot,
+	getTestFiles,
+	listProjectFiles,
+	readAislopIgnorePatterns,
+} from "../src/utils/source-files.js";
+
+const createFile = (rootDir: string, filePath: string, content = "") => {
+	const absolutePath = path.join(rootDir, filePath);
+	fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+	fs.writeFileSync(absolutePath, content, "utf-8");
+};
+
+const git = (cwd: string, args: string[]) => {
+	execFileSync("git", args, { cwd, stdio: "ignore" });
+};
+
+describe("source file selection", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-source-files-"));
+		git(tmpDir, ["init"]);
+	});
+
+	afterEach(() => {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("includes tracked source files even when gitignore matches them", async () => {
+		createFile(tmpDir, ".gitignore", "ignored.ts\nignored-dir/\nignored-untracked.ts\n");
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(tmpDir, "src/worker.ts", "export const worker = true;\n");
+		createFile(tmpDir, "src/app.test.ts", "export const testFile = true;\n");
+		createFile(tmpDir, "tests/helper.ts", "export const helper = true;\n");
+		createFile(tmpDir, "ignored.ts", "export const ignored = true;\n");
+		createFile(tmpDir, "ignored-dir/task.ts", "export const ignoredTask = true;\n");
+		createFile(tmpDir, "ignored-untracked.ts", "export const untracked = true;\n");
+
+		git(tmpDir, [
+			"add",
+			"-f",
+			".gitignore",
+			"src/app.ts",
+			"src/worker.ts",
+			"src/app.test.ts",
+			"tests/helper.ts",
+			"ignored.ts",
+			"ignored-dir/task.ts",
+		]);
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual(
+			[
+				path.join(tmpDir, "ignored-dir/task.ts"),
+				path.join(tmpDir, "ignored.ts"),
+				path.join(tmpDir, "src/app.ts"),
+				path.join(tmpDir, "src/worker.ts"),
+			].sort(),
+		);
+
+		const filteredFiles = filterProjectFiles(tmpDir, [
+			path.join(tmpDir, "src/app.ts"),
+			path.join(tmpDir, "src/app.test.ts"),
+			path.join(tmpDir, "tests/helper.ts"),
+			path.join(tmpDir, "ignored.ts"),
+			path.join(tmpDir, "ignored-untracked.ts"),
+		]);
+
+		expect(filteredFiles).toEqual([
+			path.join(tmpDir, "src/app.ts"),
+			path.join(tmpDir, "ignored.ts"),
+		]);
+
+		const project = await discoverProject(tmpDir);
+		expect(project.sourceFileCount).toBe(4);
+	});
+
+	it("skips symlinked source files even when they look in-scope", () => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-source-outside-"));
+		const outsideFile = path.join(outsideDir, "target.py");
+		fs.writeFileSync(outsideFile, "import os\nprint('outside')\n", "utf-8");
+
+		createFile(tmpDir, "src/app.py", "print('app')\n");
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.symlinkSync(outsideFile, path.join(tmpDir, "src/escape.py"));
+
+		git(tmpDir, ["add", "src/app.py", "src/escape.py"]);
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+		const explicitFiles = filterProjectFiles(tmpDir, [
+			path.join(tmpDir, "src/app.py"),
+			path.join(tmpDir, "src/escape.py"),
+		]);
+
+		expect(sourceFiles).toEqual([path.join(tmpDir, "src/app.py")]);
+		expect(explicitFiles).toEqual([path.join(tmpDir, "src/app.py")]);
+		expect(fs.readFileSync(outsideFile, "utf-8")).toBe("import os\nprint('outside')\n");
+
+		fs.rmSync(outsideDir, { recursive: true, force: true });
+	});
+
+	it("filters out files that no longer exist on disk", () => {
+		createFile(tmpDir, "src/a.ts", "export const a = 1;\n");
+		const result = filterProjectFiles(tmpDir, [
+			path.join(tmpDir, "src/a.ts"),
+			path.join(tmpDir, "src/deleted.ts"),
+		]);
+		expect(result).toEqual([path.join(tmpDir, "src/a.ts")]);
+	});
+
+	it("selects supported test files without adding them to production scan scope", () => {
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(tmpDir, "src/app.test.ts", "expect(true).toBe(true);\n");
+		createFile(tmpDir, "tests/test_pipeline.py", "assert True\n");
+		createFile(tmpDir, "tests/helper.ts", "export const helper = true;\n");
+		const candidates = [
+			"src/app.ts",
+			"src/app.test.ts",
+			"tests/test_pipeline.py",
+			"tests/helper.ts",
+		];
+
+		expect(filterProjectFiles(tmpDir, candidates)).toEqual([path.join(tmpDir, "src/app.ts")]);
+		expect(filterTestFiles(tmpDir, candidates).sort()).toEqual(
+			[path.join(tmpDir, "src/app.test.ts"), path.join(tmpDir, "tests/test_pipeline.py")].sort(),
+		);
+		expect(filterTestFiles(tmpDir, candidates, [], ["src/**"])).toEqual([
+			path.join(tmpDir, "src/app.test.ts"),
+		]);
+		expect(filterTestFiles(tmpDir, candidates, [], ["src"])).toEqual([
+			path.join(tmpDir, "src/app.test.ts"),
+		]);
+	});
+
+	it("includes common e2e spec files in test scope", () => {
+		createFile(tmpDir, "e2e/login.spec.ts", "expect(true).toBe(true);\n");
+
+		expect(filterTestFiles(tmpDir, ["e2e/login.spec.ts"])).toEqual([
+			path.join(tmpDir, "e2e/login.spec.ts"),
+		]);
+	});
+
+	it("revalidates explicit engine test files against project boundaries", () => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-test-files-outside-"));
+		try {
+			createFile(tmpDir, "src/app.test.ts", "expect(true).toBe(true);\n");
+			createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+			const outsideTest = path.join(outsideDir, "outside.test.ts");
+			fs.writeFileSync(outsideTest, "expect(true).toBe(true);\n");
+
+			expect(
+				getTestFiles({
+					rootDirectory: tmpDir,
+					languages: ["typescript"],
+					frameworks: [],
+					installedTools: {},
+					config: {
+						quality: { maxFunctionLoc: 80, maxFileLoc: 400, maxNesting: 5, maxParams: 6 },
+						security: { audit: false, auditTimeout: 0 },
+						lint: { typecheck: false },
+					},
+					testFiles: [
+						path.join(tmpDir, "src/app.test.ts"),
+						path.join(tmpDir, "src/app.ts"),
+						outsideTest,
+					],
+				}),
+			).toEqual([path.join(tmpDir, "src/app.test.ts")]);
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("revalidates project-wide evidence files against project boundaries", () => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-project-files-outside-"));
+		try {
+			createFile(tmpDir, "src/virtual.d.ts", 'declare module "local:module";\n');
+			const outsideDeclaration = path.join(outsideDir, "outside.d.ts");
+			fs.writeFileSync(outsideDeclaration, 'declare module "outside:module";\n');
+
+			expect(
+				getProjectSourceFiles({
+					rootDirectory: tmpDir,
+					languages: ["typescript"],
+					frameworks: [],
+					installedTools: {},
+					config: {
+						quality: { maxFunctionLoc: 80, maxFileLoc: 400, maxNesting: 5, maxParams: 6 },
+						security: { audit: false, auditTimeout: 0 },
+						lint: { typecheck: false },
+					},
+					projectFiles: [path.join(tmpDir, "src/virtual.d.ts"), outsideDeclaration],
+				}),
+			).toEqual([path.join(tmpDir, "src/virtual.d.ts")]);
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("skips common docs, tutorial, and sample code paths in zero-config scans", () => {
+		createFile(tmpDir, "src/app.py", "print('app')\n");
+		createFile(tmpDir, "app/bundles/ApiBundle/Tests/Functional/ControllerTest.php", "<?php\n");
+		createFile(tmpDir, "tutorials/lesson.py", "print('tutorial')\n");
+		createFile(tmpDir, "code_samples/demo.py", "print('sample')\n");
+		createFile(tmpDir, ".agents/skills/example.py", "print('skill')\n");
+		createFile(tmpDir, ".pnpm-store/v10/files/aa/package.ts", "export const cached = true;\n");
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual([path.join(tmpDir, "src/app.py")]);
+	});
+
+	it("keeps public assets in zero-config scans so security checks cover shipped code", () => {
+		createFile(tmpDir, "src/app.js", "export const app = true;\n");
+		createFile(tmpDir, "public/vuln.js", "eval(userInput);\n");
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual(
+			[path.join(tmpDir, "public/vuln.js"), path.join(tmpDir, "src/app.js")].sort(),
+		);
+	});
+
+	it("skips generated framework output and bundled artifact directories", () => {
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(
+			tmpDir,
+			"waspc/e2e-tests/test-outputs/snapshots/kitchen-sink-golden/wasp-app/.wasp/out/sdk/wasp/api/index.ts",
+			"export const generated = true;\n",
+		);
+		createFile(
+			tmpDir,
+			"packages/opencode/src/skill/compose/.bundle/brainstorm/scripts/server.cjs",
+			"module.exports = {};\n",
+		);
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual([path.join(tmpDir, "src/app.ts")]);
+	});
+
+	it("skips checked-in package manager and generated dependency artifacts", () => {
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(tmpDir, "src/components/Button.stories.tsx", "export const Story = {};\n");
+		createFile(tmpDir, "src/components/__stories__/Button.tsx", "export const Story = {};\n");
+		createFile(
+			tmpDir,
+			"packages/sdk/src/metadata/generated/schema.ts",
+			"export const generated = true;\n",
+		);
+		createFile(tmpDir, "backend/app/DomainObjects/Generated/Model.php", "<?php\n");
+		createFile(tmpDir, "src/parser/testdata/case.go", "package testdata\n");
+		createFile(tmpDir, "e2e/fixtures.ts", "export const fixture = true;\n");
+		createFile(tmpDir, "library/js/vendors/validate/plugin.js", "validate.extend({});\n");
+		createFile(tmpDir, "third_party/legacy/widget.js", "window.widget = true;\n");
+		createFile(tmpDir, ".yarn/releases/yarn-4.13.0.cjs", "// yarn release bundle\n");
+		createFile(
+			tmpDir,
+			"packages/app/constants/yarn-engine/.yarn/releases/yarn-4.9.2.cjs",
+			"// embedded yarn release bundle\n",
+		);
+		createFile(tmpDir, ".pnp.cjs", "// yarn pnp loader\n");
+		createFile(tmpDir, ".pnp.loader.mjs", "// yarn pnp esm loader\n");
+		createFile(
+			tmpDir,
+			"Documentation/EHI_Export/schemaspy/layout/schemaSpy.js",
+			"$(function () {});\n",
+		);
+		createFile(
+			tmpDir,
+			"Documentation/EHI_Export/schemaspy/layout/bower/jquery/jquery.js",
+			"window.jQuery = window.jQuery || {};\n",
+		);
+		createFile(tmpDir, "assets/bower_components/legacy/plugin.js", "define(function () {});\n");
+		createFile(tmpDir, "assets/jspm_packages/npm/pkg/index.js", "System.register([]);\n");
+
+		git(tmpDir, ["add", "-f", "."]);
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual([path.join(tmpDir, "src/app.ts")]);
+	});
+
+	it("keeps timestamp-named JavaScript files in shared scan coverage", () => {
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(
+			tmpDir,
+			"apps/admin/vite.config.ts.timestamp-1735325995918-46a167c39672.mjs",
+			"// vite cache\n",
+		);
+		createFile(
+			tmpDir,
+			"apps/web/vite.config.ts.timestamp-1700000000000-abc123def456.cjs",
+			"// vite cache\n",
+		);
+		createFile(tmpDir, "src/normal.timestamp-1.mjs", "// not a cache file\n");
+
+		git(tmpDir, [
+			"add",
+			"-f",
+			"src/app.ts",
+			"apps/admin/vite.config.ts.timestamp-1735325995918-46a167c39672.mjs",
+			"apps/web/vite.config.ts.timestamp-1700000000000-abc123def456.cjs",
+			"src/normal.timestamp-1.mjs",
+		]);
+		git(tmpDir, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed"]);
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual(
+			[
+				path.join(tmpDir, "apps/admin/vite.config.ts.timestamp-1735325995918-46a167c39672.mjs"),
+				path.join(tmpDir, "apps/web/vite.config.ts.timestamp-1700000000000-abc123def456.cjs"),
+				path.join(tmpDir, "src/app.ts"),
+				path.join(tmpDir, "src/normal.timestamp-1.mjs"),
+			].sort(),
+		);
+	});
+
+	it("does not let Biome exclusions remove files from zero-config scans", () => {
+		createFile(
+			tmpDir,
+			"biome.json",
+			JSON.stringify({
+				files: {
+					includes: ["**", "!src/vulnerable.ts"],
+				},
+			}),
+		);
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(tmpDir, "src/vulnerable.ts", "export const secret = 'scan me';\n");
+
+		const sourceFiles = getSourceFilesForRoot(tmpDir).sort();
+
+		expect(sourceFiles).toEqual(
+			[path.join(tmpDir, "src/app.ts"), path.join(tmpDir, "src/vulnerable.ts")].sort(),
+		);
+	});
+
+	it("reads .aislopignore patterns, skipping blanks and comments", () => {
+		createFile(tmpDir, ".aislopignore", "# generated code\nlegacy\n\nsrc/api.generated.ts\n");
+
+		expect(readAislopIgnorePatterns(tmpDir)).toEqual(["legacy", "src/api.generated.ts"]);
+	});
+
+	it.runIf(process.platform !== "win32")("does not follow a symlinked .aislopignore", () => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-ignore-outside-"));
+		try {
+			const outsideFile = path.join(outsideDir, "ignore");
+			fs.writeFileSync(outsideFile, "src/**\n", "utf-8");
+			fs.symlinkSync(outsideFile, path.join(tmpDir, ".aislopignore"));
+
+			expect(readAislopIgnorePatterns(tmpDir)).toEqual([]);
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("excludes files matched by .aislopignore patterns", () => {
+		createFile(tmpDir, ".aislopignore", "legacy\nsrc/api.generated.ts\n");
+		createFile(tmpDir, "src/app.ts", "export const app = true;\n");
+		createFile(tmpDir, "legacy/old.ts", "export const old = true;\n");
+		createFile(tmpDir, "src/api.generated.ts", "export const gen = true;\n");
+
+		const filtered = filterProjectFiles(
+			tmpDir,
+			[
+				path.join(tmpDir, "src/app.ts"),
+				path.join(tmpDir, "legacy/old.ts"),
+				path.join(tmpDir, "src/api.generated.ts"),
+			],
+			[],
+			readAislopIgnorePatterns(tmpDir),
+		);
+
+		expect(filtered).toEqual([path.join(tmpDir, "src/app.ts")]);
+	});
+});
+
+describe("C/C++ file discovery", () => {
+	it("includes C/C++ sources and excludes C/C++ test files", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-cpp-"));
+		fs.mkdirSync(path.join(root, "src"), { recursive: true });
+		fs.mkdirSync(path.join(root, "tests"), { recursive: true });
+		fs.writeFileSync(path.join(root, "src/widget.cpp"), "int x;\n");
+		fs.writeFileSync(path.join(root, "src/widget.h"), "int x;\n");
+		fs.writeFileSync(path.join(root, "src/widget_test.cpp"), "int main(){}\n");
+		fs.writeFileSync(path.join(root, "tests/runner.cpp"), "int main(){}\n");
+		const files = filterProjectFiles(root, listProjectFiles(root)).map((f) => path.basename(f));
+		expect(files).toContain("widget.cpp");
+		expect(files).toContain("widget.h");
+		expect(files).not.toContain("widget_test.cpp");
+		expect(files).not.toContain("runner.cpp"); // under tests/
+	});
+});
+
+describe("C# file discovery", () => {
+	it("includes .cs source files", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-cs-"));
+		fs.writeFileSync(path.join(root, "Service.cs"), "class Service {}");
+		const result = filterProjectFiles(root, ["Service.cs"]);
+		expect(result).toHaveLength(1);
+	});
+
+	it("excludes C# test files by convention", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-cs-"));
+		fs.writeFileSync(path.join(root, "ServiceTests.cs"), "class ServiceTests {}");
+		fs.writeFileSync(path.join(root, "Widget.Test.cs"), "class WidgetTest {}");
+		const result = filterProjectFiles(root, ["ServiceTests.cs", "Widget.Test.cs"]);
+		expect(result).toHaveLength(0);
+	});
+});

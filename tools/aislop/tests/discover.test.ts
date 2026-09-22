@@ -1,0 +1,361 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { detectSourceLanguages, discoverProject } from "../src/utils/discover.js";
+
+// Helpers to create fake project directories
+const createFile = (dir: string, filename: string, content = "") => {
+	fs.writeFileSync(path.join(dir, filename), content, "utf-8");
+};
+
+// Source-file discovery walks the git index, so source-based language detection
+// only fires inside a git repo (which every real aislop target is).
+const gitInit = (dir: string) => {
+	execFileSync("git", ["init", "-q"], { cwd: dir });
+};
+
+describe("discoverProject", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-discover-"));
+	});
+
+	afterEach(() => {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	// ─── rootDirectory & projectName ────────────────────────────────────────────
+
+	it("resolves rootDirectory to an absolute path", async () => {
+		const info = await discoverProject(tmpDir);
+		expect(path.isAbsolute(info.rootDirectory)).toBe(true);
+		expect(info.rootDirectory).toBe(path.resolve(tmpDir));
+	});
+
+	it("uses package.json name as projectName when available", async () => {
+		createFile(tmpDir, "package.json", JSON.stringify({ name: "my-cool-app" }));
+		const info = await discoverProject(tmpDir);
+		expect(info.projectName).toBe("my-cool-app");
+	});
+
+	it("falls back to directory basename when package.json is absent", async () => {
+		const info = await discoverProject(tmpDir);
+		expect(info.projectName).toBe(path.basename(tmpDir));
+	});
+
+	it("falls back to directory basename when package.json has no name field", async () => {
+		createFile(tmpDir, "package.json", JSON.stringify({ version: "1.0.0" }));
+		const info = await discoverProject(tmpDir);
+		expect(info.projectName).toBe(path.basename(tmpDir));
+	});
+
+	it("falls back to directory basename when package.json is invalid JSON", async () => {
+		createFile(tmpDir, "package.json", "{ invalid }");
+		const info = await discoverProject(tmpDir);
+		expect(info.projectName).toBe(path.basename(tmpDir));
+	});
+
+	// ─── Language detection ──────────────────────────────────────────────────────
+
+	it("detects typescript when tsconfig.json is present", async () => {
+		createFile(tmpDir, "tsconfig.json", "{}");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("typescript");
+	});
+
+	it("detects javascript (not typescript) when package.json exists without tsconfig", async () => {
+		createFile(tmpDir, "package.json", JSON.stringify({ name: "js-app" }));
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("javascript");
+		expect(info.languages).not.toContain("typescript");
+	});
+
+	it("detects typescript when both tsconfig.json and package.json are present", async () => {
+		createFile(tmpDir, "package.json", JSON.stringify({ name: "ts-app" }));
+		createFile(tmpDir, "tsconfig.json", "{}");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("typescript");
+	});
+
+	it("detects go when go.mod is present", async () => {
+		createFile(tmpDir, "go.mod", "module example.com/app\n\ngo 1.21");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("go");
+	});
+
+	it("detects rust when Cargo.toml is present", async () => {
+		createFile(tmpDir, "Cargo.toml", '[package]\nname = "app"');
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("rust");
+	});
+
+	it("detects ruby when Gemfile is present", async () => {
+		createFile(tmpDir, "Gemfile", "source 'https://rubygems.org'");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("ruby");
+	});
+
+	it("detects php when composer.json is present", async () => {
+		createFile(tmpDir, "composer.json", "{}");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("php");
+	});
+
+	it("detects python when requirements.txt is present", async () => {
+		createFile(tmpDir, "requirements.txt", "flask==2.0.0");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("python");
+	});
+
+	it("detects python when pyproject.toml is present", async () => {
+		createFile(tmpDir, "pyproject.toml", "[tool.poetry]");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("python");
+	});
+
+	it("detects java when pom.xml is present", async () => {
+		createFile(tmpDir, "pom.xml", "<project/>");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("java");
+	});
+
+	it("detects java when build.gradle is present", async () => {
+		createFile(tmpDir, "build.gradle", "plugins {}");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("java");
+	});
+
+	it("detects csharp from bare .cs source files with no manifest", async () => {
+		// The scan pipeline derives languages from enumerated source files via
+		// detectSourceLanguages, bypassing manifest detection - so .cs must be in
+		// the extension map or every csharp-gated engine silently skips in real
+		// scans even though discoverProject sees the .csproj.
+		createFile(tmpDir, "Program.cs", "class Program { static void Main() { } }");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("csharp");
+		expect(detectSourceLanguages([path.join(tmpDir, "Program.cs")])).toContain("csharp");
+	});
+
+	it("detects csharp from a .csproj file", async () => {
+		createFile(tmpDir, "App.csproj", "<Project></Project>");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("csharp");
+	});
+
+	it("detects csharp from a .sln file", async () => {
+		createFile(tmpDir, "App.sln", "Microsoft Visual Studio Solution File");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("csharp");
+	});
+
+	it("detects csharp from a .slnx file", async () => {
+		createFile(tmpDir, "App.slnx", "<Solution></Solution>");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("csharp");
+	});
+
+	it("detects csharp from a global.json file", async () => {
+		createFile(tmpDir, "global.json", '{ "sdk": { "version": "8.0.0" } }');
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("csharp");
+	});
+
+	it("detects cpp from source files and CMakeLists, and scores them", async () => {
+		gitInit(tmpDir);
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		createFile(tmpDir, "CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\n");
+		createFile(
+			tmpDir,
+			"src/foo.cpp",
+			"#include <vector>\nint add(int a, int b) { return a + b; }\n",
+		);
+		createFile(tmpDir, "src/foo.h", "#pragma once\nint add(int, int);\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("cpp");
+		expect(info.coverage.scoreable).toBe(true);
+		expect(info.coverage.dominantUnsupported).toBe(null);
+		expect(info.installedTools).toHaveProperty("cppcheck");
+		expect(info.installedTools).toHaveProperty("clang-format");
+		expect(info.installedTools).toHaveProperty("clang-tidy");
+	});
+
+	it("detects multiple languages in the same project", async () => {
+		createFile(tmpDir, "tsconfig.json", "{}");
+		createFile(tmpDir, "go.mod", "module example.com/app\n\ngo 1.21");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("typescript");
+		expect(info.languages).toContain("go");
+	});
+
+	it("returns empty languages array when no signals are found", async () => {
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toEqual([]);
+	});
+
+	// ─── Source-file-based language detection (no manifest present) ──────────────
+
+	it("detects python from a .py source file when no manifest is present", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "main.py", "import os\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("python");
+	});
+
+	it("detects go from a .go source file when no manifest is present", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "main.go", "package main\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("go");
+	});
+
+	it("detects rust from a .rs source file when no manifest is present", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "main.rs", "fn main() {}\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("rust");
+	});
+
+	it("detects ruby from a .rb source file when no manifest is present", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "app.rb", "puts 'hi'\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("ruby");
+	});
+
+	it("detects java from a .java source file when no manifest is present", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "Main.java", "class Main {}\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("java");
+	});
+
+	it("detects php from a .php source file when no manifest is present", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "index.php", "<?php\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toContain("php");
+	});
+
+	it("still detects no languages for a git repo with only non-source files", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "README.md", "# hi\n");
+		const info = await discoverProject(tmpDir);
+		expect(info.languages).toEqual([]);
+	});
+
+	// ─── Framework detection ─────────────────────────────────────────────────────
+
+	it("detects nextjs from next.config.js", async () => {
+		createFile(tmpDir, "next.config.js", "module.exports = {}");
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("nextjs");
+	});
+
+	it("detects nextjs from next.config.mjs", async () => {
+		createFile(tmpDir, "next.config.mjs", "export default {}");
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("nextjs");
+	});
+
+	it("detects nextjs from package.json dependency", async () => {
+		createFile(
+			tmpDir,
+			"package.json",
+			JSON.stringify({ name: "app", dependencies: { next: "14.0.0" } }),
+		);
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("nextjs");
+	});
+
+	it("detects react from package.json dependency", async () => {
+		createFile(
+			tmpDir,
+			"package.json",
+			JSON.stringify({ name: "app", dependencies: { react: "18.0.0" } }),
+		);
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("react");
+	});
+
+	it("detects vite from devDependencies", async () => {
+		createFile(
+			tmpDir,
+			"package.json",
+			JSON.stringify({ name: "app", devDependencies: { vite: "5.0.0" } }),
+		);
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("vite");
+	});
+
+	it("detects expo from package.json dependency", async () => {
+		createFile(
+			tmpDir,
+			"package.json",
+			JSON.stringify({ name: "app", dependencies: { expo: "54.0.0" } }),
+		);
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("expo");
+	});
+
+	it("detects django from requirements.txt", async () => {
+		createFile(tmpDir, "requirements.txt", "Django==4.2.0\npsycopg2");
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("django");
+	});
+
+	it("detects flask from requirements.txt", async () => {
+		createFile(tmpDir, "requirements.txt", "Flask==2.3.0");
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("flask");
+	});
+
+	it("detects fastapi from requirements.txt", async () => {
+		createFile(tmpDir, "requirements.txt", "fastapi==0.100.0\nuvicorn");
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("fastapi");
+	});
+
+	it("returns none when no frameworks are detected", async () => {
+		const info = await discoverProject(tmpDir);
+		expect(info.frameworks).toContain("none");
+	});
+
+	// ─── installedTools ──────────────────────────────────────────────────────────
+
+	it("returns installedTools as a Record<string, boolean>", async () => {
+		const info = await discoverProject(tmpDir);
+		expect(typeof info.installedTools).toBe("object");
+		for (const val of Object.values(info.installedTools)) {
+			expect(typeof val).toBe("boolean");
+		}
+	});
+
+	// ─── sourceFileCount ─────────────────────────────────────────────────────────
+
+	it("returns sourceFileCount as a non-negative number", async () => {
+		const info = await discoverProject(tmpDir);
+		expect(info.sourceFileCount).toBeGreaterThanOrEqual(0);
+	});
+
+	// discoverProject is the shared entry point every scan flavor (scan, ci, doctor, fix,
+	// both MCP tools) calls exactly once, so it resets the gitignore snapshot cache at its
+	// own top. Without that, a long-lived process such as the MCP server would keep
+	// answering a second scan from the first scan's snapshot, silently missing any file
+	// created after that first scan. This calls discoverProject twice in the same process,
+	// with no manual cache reset in between, to prove the production code path handles it.
+	it("sees a file created between two scans in the same process", async () => {
+		gitInit(tmpDir);
+		createFile(tmpDir, "first.ts", "export const first = true;\n");
+
+		const firstScan = await discoverProject(tmpDir);
+		expect(firstScan.sourceFileCount).toBe(1);
+
+		createFile(tmpDir, "second.ts", "export const second = true;\n");
+
+		const secondScan = await discoverProject(tmpDir);
+		expect(secondScan.sourceFileCount).toBe(2);
+	});
+});

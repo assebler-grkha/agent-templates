@@ -1,0 +1,239 @@
+import type { ChangeContext, Diagnostic, EngineResult } from "../engines/types.js";
+import { highlightAislop } from "../ui/brand.js";
+import { log } from "../ui/logger.js";
+import { symbols } from "../ui/symbols.js";
+import { style, theme } from "../ui/theme.js";
+import { changeContextOrder } from "../utils/change-context.js";
+import { getEngineLabel } from "./engine-info.js";
+
+const groupBy = <T>(items: T[], key: (item: T) => string): Map<string, T[]> => {
+	const map = new Map<string, T[]>();
+	for (const item of items) {
+		const k = key(item);
+		const group = map.get(k) ?? [];
+		group.push(item);
+		map.set(k, group);
+	}
+	return map;
+};
+
+const colorBySeverity = (text: string, severity: string): string =>
+	severity === "error" ? style(theme, "danger", text) : style(theme, "warn", text);
+
+const toElapsedLabel = (elapsedMs: number): string =>
+	elapsedMs < 1000 ? `${Math.round(elapsedMs)}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
+
+const toSeverityLabel = (severity: Diagnostic["severity"]): string => {
+	if (severity === "error") return "ERROR";
+	if (severity === "warning") return "WARN";
+	return "INFO";
+};
+
+const toLocationLabel = (diagnostic: Diagnostic): string => {
+	const line = diagnostic.line > 0 ? `:${diagnostic.line}` : "";
+	const column = diagnostic.column > 0 ? `:${diagnostic.column}` : "";
+	return `${diagnostic.filePath}${line}${column}`;
+};
+
+const wrapText = (
+	text: string,
+	maxWidth: number,
+	firstIndentWidth: number,
+	contIndent: string,
+): string[] => {
+	const firstWidth = Math.max(20, maxWidth - firstIndentWidth);
+	const contWidth = Math.max(20, maxWidth - contIndent.length);
+	const words = text.split(/\s+/).filter((w) => w.length > 0);
+	const lines: string[] = [];
+	let current = "";
+	for (const word of words) {
+		const budget = lines.length === 0 ? firstWidth : contWidth;
+		if (current.length === 0) {
+			current = word;
+		} else if (current.length + 1 + word.length <= budget) {
+			current = `${current} ${word}`;
+		} else {
+			lines.push(current);
+			current = word;
+		}
+	}
+	if (current.length > 0) lines.push(current);
+	return lines.map((line, i) => (i === 0 ? line : `${contIndent}${line}`));
+};
+
+const wrapHelpText = (text: string, maxWidth: number, indent: string): string[] => {
+	const segments = wrapText(text, maxWidth, indent.length, indent);
+	// The first segment has no prefix; help lines always start at the indent.
+	return segments.map((seg, i) => (i === 0 ? `${indent}${seg}` : seg));
+};
+
+const terminalWidth = (): number => {
+	const raw = process.stdout.columns;
+	if (typeof raw !== "number" || raw <= 0) return 120;
+	return Math.min(raw, 120);
+};
+
+const renderRuleHeader = (first: Diagnostic, count: number, lines: string[]): void => {
+	const level = toSeverityLabel(first.severity);
+	const countLabel = count > 1 ? ` (${count})` : "";
+	const status = colorBySeverity(level, first.severity);
+	const fixableTag = first.fixable ? ` ${style(theme, "muted", "[auto]")}` : "";
+	const fixableWidth = first.fixable ? " [auto]".length : 0;
+	const badgePrefix = `    [${status}]${fixableTag} `;
+	const badgePrefixWidth = 4 + 1 + level.length + 1 + fixableWidth + 1;
+	const wrapped = wrapText(
+		`${first.message}${countLabel}`,
+		terminalWidth(),
+		badgePrefixWidth,
+		"      ",
+	);
+	lines.push(`${badgePrefix}${wrapped[0]}`);
+	for (let i = 1; i < wrapped.length; i++) lines.push(wrapped[i]);
+};
+
+const renderLocations = (ruleDiags: Diagnostic[], verbose: boolean, lines: string[]): void => {
+	const unique: { label: string; detail: string }[] = [];
+	const seen = new Set<string>();
+	for (const d of ruleDiags) {
+		const label = toLocationLabel(d);
+		const detail = d.detail ?? "";
+		const key = `${label}|${detail}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		unique.push({ label, detail });
+	}
+	const shown = verbose ? unique : unique.slice(0, 3);
+	const maxLabel = shown.reduce((w, l) => Math.max(w, l.label.length), 0);
+	for (const { label, detail } of shown) {
+		const padded = detail ? `${label.padEnd(maxLabel)}  ${detail}` : label;
+		lines.push(style(theme, "muted", `      ${padded}`));
+	}
+	if (!verbose && unique.length > shown.length) {
+		lines.push(
+			style(
+				theme,
+				"muted",
+				`      +${unique.length - shown.length} more location(s), use -d for full list`,
+			),
+		);
+	}
+};
+
+const renderHiddenFooter = (
+	sorted: [string, Diagnostic[]][],
+	maxRules: number,
+	lines: string[],
+): void => {
+	const hidden = sorted.slice(maxRules);
+	const hiddenErrors = hidden.reduce(
+		(acc, [, diags]) => acc + (diags[0].severity === "error" ? diags.length : 0),
+		0,
+	);
+	const hiddenWarnings = hidden.reduce(
+		(acc, [, diags]) => acc + (diags[0].severity === "warning" ? diags.length : 0),
+		0,
+	);
+	const parts: string[] = [];
+	if (hiddenErrors > 0) parts.push(`${hiddenErrors} error${hiddenErrors === 1 ? "" : "s"}`);
+	if (hiddenWarnings > 0) parts.push(`${hiddenWarnings} warning${hiddenWarnings === 1 ? "" : "s"}`);
+	const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+	lines.push(
+		style(
+			theme,
+			"muted",
+			`    ... and ${hidden.length} more rules hidden${detail}. Run with -v or --verbose to see full output.`,
+		),
+	);
+	lines.push("");
+};
+
+const CHANGE_CONTEXT_HEADING: Record<ChangeContext, string> = {
+	"changed-line": "Changed lines",
+	"existing-file-context": "Existing file context",
+	unknown: "Unclassified",
+};
+
+const renderEngineGroups = (diagnostics: Diagnostic[], verbose: boolean, lines: string[]): void => {
+	const byEngine = groupBy(diagnostics, (d) => d.engine);
+
+	for (const [engine, engineDiags] of byEngine) {
+		const label = getEngineLabel(engine as Diagnostic["engine"]);
+		lines.push(`  ${style(theme, "bold", `${symbols.engineActive} ${label}`)}`);
+
+		const byRule = groupBy(engineDiags, (d) => `${d.rule}:${d.message}`);
+		const sorted = [...byRule.entries()].sort(([, a], [, b]) => {
+			const sa = a[0].severity === "error" ? 0 : a[0].severity === "warning" ? 1 : 2;
+			const sb = b[0].severity === "error" ? 0 : b[0].severity === "warning" ? 1 : 2;
+			if (sa !== sb) return sa - sb;
+			return b.length - a.length;
+		});
+
+		const maxRules = verbose ? Infinity : 40;
+		for (const [, ruleDiags] of sorted.slice(0, maxRules)) {
+			const first = ruleDiags[0];
+			renderRuleHeader(first, ruleDiags.length, lines);
+			renderLocations(ruleDiags, verbose, lines);
+			if (first.help) {
+				const wrapped = wrapHelpText(first.help, terminalWidth(), "      ");
+				for (const line of wrapped) lines.push(highlightAislop(line, theme, "muted"));
+			}
+			lines.push("");
+		}
+
+		if (sorted.length > maxRules) renderHiddenFooter(sorted, maxRules, lines);
+	}
+};
+
+export const renderDiagnostics = (diagnostics: Diagnostic[], verbose: boolean): string => {
+	const lines: string[] = [];
+	const classified = diagnostics.some((diagnostic) => diagnostic.changeContext);
+	if (!classified) {
+		renderEngineGroups(diagnostics, verbose, lines);
+		return `${lines.join("\n")}\n`;
+	}
+
+	const partitions = new Map<ChangeContext, Diagnostic[]>();
+	for (const diagnostic of [...diagnostics].sort(
+		(left, right) =>
+			changeContextOrder(left.changeContext) - changeContextOrder(right.changeContext),
+	)) {
+		const key = diagnostic.changeContext ?? "unknown";
+		const group = partitions.get(key) ?? [];
+		group.push(diagnostic);
+		partitions.set(key, group);
+	}
+
+	const order: ChangeContext[] = ["changed-line", "existing-file-context", "unknown"];
+	for (const key of order) {
+		const group = partitions.get(key);
+		if (!group || group.length === 0) continue;
+		lines.push(`  ${style(theme, "section", CHANGE_CONTEXT_HEADING[key])}`);
+		renderEngineGroups(group, verbose, lines);
+	}
+
+	return `${lines.join("\n")}\n`;
+};
+
+export const printEngineStatus = (result: EngineResult): void => {
+	const label = getEngineLabel(result.engine);
+	const elapsed = toElapsedLabel(result.elapsed);
+
+	if (result.skipped) {
+		log.warn(`${label}: skipped${result.skipReason ? ` (${result.skipReason})` : ""}`);
+	} else if (result.diagnostics.length === 0) {
+		log.success(`${label}: done (0 issues, ${elapsed})`);
+	} else {
+		const errors = result.diagnostics.filter((d) => d.severity === "error").length;
+		const warnings = result.diagnostics.filter((d) => d.severity === "warning").length;
+		const parts: string[] = [];
+		if (errors > 0) parts.push(`${errors} error${errors === 1 ? "" : "s"}`);
+		if (warnings > 0) parts.push(`${warnings} warning${warnings === 1 ? "" : "s"}`);
+		const statusText = `${parts.join(", ")}, ${elapsed}`;
+
+		if (errors > 0) {
+			log.error(`${label}: done (${statusText})`);
+		} else {
+			log.warn(`${label}: done (${statusText})`);
+		}
+	}
+};

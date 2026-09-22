@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+vendor/
+.venv/
+env/
+ENV/
+
+# Production & Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+target/
+
+# Logs & Dumps
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.dump
+*.sql
+*.sql.gz
+
+# Databases & Local Storage
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+
+# Environment & Secrets (Never commit secrets!)
+.env*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# Editor & OS artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Cache & Diagnostics
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.pyc
+.turbo/
+.parcel-cache/
+.eslintcache
+coverage/
+
+# Agent Scratchpad & Temp (Single-use test scripts)
+scratch/
+tmp/
+temp/

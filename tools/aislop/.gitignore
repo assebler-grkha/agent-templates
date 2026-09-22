@@ -1,0 +1,17 @@
+node_modules/
+.idea/
+# dist/ is tracked for zero-setup MCP execution
+
+tools/bin/
+tools/analyzers/
+assets/release-fix-scan.*
+*.tgz
+.DS_Store
+.claude
+CHANGELOG-review.md
+docs/superpowers/
+docs/specs/
+.aislop/session.jsonl
+.aislop/history.jsonl
+.aislop/hook.lock
+.aislop/baseline.json

@@ -1,0 +1,290 @@
+import os from "node:os";
+import type { Command } from "commander";
+import {
+	defaultInstallTargets,
+	hasExplicitAgentSelection,
+	hookBaseline,
+	hookInstall,
+	hookRun,
+	hookStatus,
+	hookUninstall,
+	promptAgentSelection,
+	resolveAgents,
+} from "../commands/hook.js";
+import { loadConfig } from "../config/index.js";
+import { type AgentName, detectInstalledAgents } from "../hooks/install/registry.js";
+import { withCommandLifecycle } from "../telemetry/index.js";
+import { log } from "../ui/logger.js";
+
+type AgentFlagOpts = Partial<
+	Record<
+		| "claude"
+		| "cursor"
+		| "gemini"
+		| "pi"
+		| "codex"
+		| "windsurf"
+		| "cline"
+		| "kilocode"
+		| "antigravity"
+		| "copilot",
+		boolean
+	>
+>;
+
+const AGENT_NAMES = [
+	"claude",
+	"cursor",
+	"gemini",
+	"pi",
+	"codex",
+	"windsurf",
+	"cline",
+	"kilocode",
+	"antigravity",
+	"copilot",
+] as const;
+
+const resolveScope = (flags: { global?: boolean; project?: boolean }): "global" | "project" => {
+	if (flags.project) return "project";
+	if (flags.global) return "global";
+	return "global";
+};
+
+const promptForUninstall = async (): Promise<AgentName[] | null> => {
+	const installed = detectInstalledAgents({ home: os.homedir(), cwd: process.cwd() });
+	if (installed.length === 0) {
+		log.warn("No aislop hooks installed. Nothing to uninstall.");
+		return [];
+	}
+	const picked = await promptAgentSelection("uninstall", { installed });
+	if (picked === null) {
+		log.warn("Cancelled.");
+		return null;
+	}
+	if (picked.length === 0) {
+		log.warn("No agents selected. Nothing to uninstall.");
+		return [];
+	}
+	return picked;
+};
+
+const promptForInstall = async (): Promise<AgentName[] | null> => {
+	const picked = await promptAgentSelection("install");
+	if (picked === null) {
+		log.warn("Cancelled.");
+		return null;
+	}
+	if (picked.length === 0) {
+		log.warn("No agents selected. Nothing to install.");
+		return [];
+	}
+	return picked;
+};
+
+const pickAgents = async (
+	mode: "install" | "uninstall",
+	opts: AgentFlagOpts & { agent?: string },
+	positional: string[],
+): Promise<AgentName[] | null> => {
+	if (hasExplicitAgentSelection(opts, positional, opts.agent)) {
+		return resolveAgents(opts, positional, opts.agent, defaultInstallTargets());
+	}
+	if (!process.stdin.isTTY) return defaultInstallTargets();
+	return mode === "uninstall" ? promptForUninstall() : promptForInstall();
+};
+
+type InstallOpts = AgentFlagOpts & {
+	agent?: string;
+	global?: boolean;
+	project?: boolean;
+	dryRun?: boolean;
+	yes?: boolean;
+	qualityGate?: boolean;
+};
+
+type UninstallOpts = AgentFlagOpts & {
+	agent?: string;
+	global?: boolean;
+	project?: boolean;
+	dryRun?: boolean;
+};
+
+const addAgentShortcutOptions = (command: Command): Command => {
+	for (const a of AGENT_NAMES) command.option(`--${a}`, `shortcut for --agent ${a}`);
+	return command;
+};
+
+const addInstallOptions = (command: Command): Command =>
+	addAgentShortcutOptions(
+		command
+			.option(
+				"--agent <names>",
+				"comma-separated agent list (claude,cursor,gemini,codex,windsurf,cline,kilocode,antigravity,copilot)",
+			)
+			.option("-g, --global", "install to the user-scope config (default)")
+			.option("--project", "install to the project-scope config")
+			.option("--dry-run", "print the planned diff without writing")
+			.option("--yes", "skip the confirmation prompt (reserved)")
+			.option(
+				"--quality-gate",
+				"add a Stop hook that blocks when score regresses below baseline (Claude only)",
+			),
+	);
+
+const addUninstallOptions = (command: Command): Command =>
+	addAgentShortcutOptions(
+		command
+			.option("--agent <names>", "comma-separated agent list")
+			.option("-g, --global", "uninstall from user-scope config")
+			.option("--project", "uninstall from project-scope config")
+			.option("--dry-run", "print the planned removal without writing"),
+	);
+
+const runInstallAction = async (positional: string[], opts: InstallOpts): Promise<void> => {
+	const agents = await pickAgents("install", opts, positional);
+	if (agents === null || agents.length === 0) return;
+	await withCommandLifecycle(
+		{ command: "hook_install", config: loadConfig(process.cwd()).telemetry },
+		async () => {
+			await hookInstall({
+				agents,
+				scope: resolveScope(opts),
+				dryRun: Boolean(opts.dryRun),
+				yes: Boolean(opts.yes),
+				qualityGate: Boolean(opts.qualityGate),
+			});
+			return { exitCode: 0 };
+		},
+	);
+};
+
+const runUninstallAction = async (positional: string[], opts: UninstallOpts): Promise<void> => {
+	const agents = await pickAgents("uninstall", opts, positional);
+	if (agents === null || agents.length === 0) return;
+	await withCommandLifecycle(
+		{ command: "hook_uninstall", config: loadConfig(process.cwd()).telemetry },
+		async () => {
+			await hookUninstall({
+				agents,
+				scope: resolveScope(opts),
+				dryRun: Boolean(opts.dryRun),
+				yes: true,
+				qualityGate: false,
+			});
+			return { exitCode: 0 };
+		},
+	);
+};
+
+const normalizeHookAliasAgents = (agents: string[]): string[] => {
+	const [first, ...rest] = agents;
+	return first === "hook" || first === "hooks" ? rest : agents;
+};
+
+const registerInstall = (hook: Command): void => {
+	addInstallOptions(
+		hook
+			.command("install [agents...]")
+			.description(
+				"Install hooks for one or more coding agents. Use positional agents, per-agent flags, or --agent.",
+			),
+	).action(runInstallAction);
+};
+
+const registerUninstall = (hook: Command): void => {
+	addUninstallOptions(
+		hook
+			.command("uninstall [agents...]")
+			.description(
+				"Remove hooks for one or more coding agents. Use positional agents, per-agent flags, or --agent.",
+			),
+	).action(runUninstallAction);
+};
+
+const registerCallbacks = (hook: Command): void => {
+	hook
+		.command("status")
+		.description("Show installed agent hooks")
+		.action(async () => {
+			await withCommandLifecycle(
+				{ command: "hook_status", config: loadConfig(process.cwd()).telemetry },
+				async () => {
+					await hookStatus();
+					return { exitCode: 0 };
+				},
+			);
+		});
+	hook
+		.command("baseline")
+		.description("Capture the current score as the hook baseline")
+		.action(async () => {
+			await withCommandLifecycle(
+				{ command: "hook_baseline", config: loadConfig(process.cwd()).telemetry },
+				async () => {
+					await hookBaseline();
+					return { exitCode: 0 };
+				},
+			);
+		});
+	hook
+		.command("claude", { hidden: true })
+		.description("Internal: Claude Code PostToolUse / Stop / FileChanged callback (reads stdin)")
+		.option("--stop", "run in Stop-hook mode for the quality gate")
+		.option(
+			"--on-file-changed",
+			"run in FileChanged mode (refresh baseline on watched file change)",
+		)
+		.action(async (opts: { stop?: boolean; onFileChanged?: boolean }) => {
+			await hookRun("claude", {
+				stop: Boolean(opts.stop),
+				onFileChanged: Boolean(opts.onFileChanged),
+			});
+		});
+	hook
+		.command("cursor", { hidden: true })
+		.description("Internal: Cursor afterFileEdit callback (reads stdin)")
+		.action(async () => {
+			await hookRun("cursor");
+		});
+	hook
+		.command("gemini", { hidden: true })
+		.description("Internal: Gemini CLI AfterTool callback (reads stdin)")
+		.action(async () => {
+			await hookRun("gemini");
+		});
+	hook
+		.command("pi", { hidden: true })
+		.description("Internal: pi extension tool_result callback (reads stdin)")
+		.action(async () => {
+			await hookRun("pi");
+		});
+};
+
+export const registerHookCommand = (program: Command): void => {
+	const hook = program
+		.command("hook")
+		.alias("hooks")
+		.description("Manage per-edit coding-agent hooks");
+	registerInstall(hook);
+	registerUninstall(hook);
+	registerCallbacks(hook);
+};
+
+export const registerHookAliases = (program: Command): void => {
+	addInstallOptions(
+		program
+			.command("install [agents...]")
+			.description("Install coding-agent hooks (alias: hook install)"),
+	).action(async (agents: string[], opts: InstallOpts) => {
+		await runInstallAction(normalizeHookAliasAgents(agents), opts);
+	});
+
+	addUninstallOptions(
+		program
+			.command("uninstall [agents...]")
+			.description("Remove coding-agent hooks (alias: hook uninstall)"),
+	).action(async (agents: string[], opts: UninstallOpts) => {
+		await runUninstallAction(normalizeHookAliasAgents(agents), opts);
+	});
+};

@@ -1,0 +1,80 @@
+name: Sync main → develop
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: develop
+          # SYNC_BOT_PAT is a fine-grained PAT with contents:write,
+          # pull-requests:write, and workflows:write on this repo. Pushes via
+          # this token attribute to the PAT's user, so downstream pull_request
+          # workflows run; GITHUB_TOKEN cannot because of GitHub's anti-loop guard.
+          token: ${{ secrets.SYNC_BOT_PAT }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "scanaislop-sync[bot]"
+          git config user.email "scanaislop-sync@users.noreply.github.com"
+
+      - name: Decide what to do
+        id: plan
+        run: |
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "develop already contains main — nothing to do"
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet origin/main HEAD; then
+            echo "main and develop have identical trees — only commit graph differs, skip"
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sync commit (parent = develop, tree = main)
+        if: steps.plan.outputs.needs_sync == 'true'
+        run: |
+          # Don't replay main's commits onto develop — that conflicts when
+          # both branches squashed the same content under different SHAs.
+          # Capture the diff as a single commit on top of develop instead.
+          git read-tree --reset -u origin/main
+          git commit -m "chore: sync main → develop"
+          git push --force origin HEAD:refs/heads/bot/sync-from-main
+
+      - name: Open or update PR with auto-merge
+        if: steps.plan.outputs.needs_sync == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_BOT_PAT }}
+        run: |
+          existing=$(gh pr list \
+            --base develop \
+            --head bot/sync-from-main \
+            --state open \
+            --json number,headRefName,headRepository \
+            --jq '.[] | select(.headRefName == "bot/sync-from-main" and .headRepository.nameWithOwner == env.GITHUB_REPOSITORY) | .number' \
+            | head -n 1)
+          if [ -z "$existing" ]; then
+            num=$(gh pr create \
+              --base develop \
+              --head bot/sync-from-main \
+              --title "chore: sync main → develop" \
+              --body "Auto-opened by \`.github/workflows/sync-develop.yml\`. Brings develop up to main. Auto-merge enabled (squash) — merges itself once CI passes." \
+              | grep -oE '[0-9]+$')
+          else
+            num=$existing
+          fi
+          gh pr merge "$num" --squash --auto --delete-branch
+
+      - name: No-op summary
+        if: steps.plan.outputs.needs_sync == 'false'
+        run: echo "develop already contains main — nothing to do." >> "$GITHUB_STEP_SUMMARY"

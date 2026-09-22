@@ -1,0 +1,54 @@
+name: aislop — AI Code Quality Gate
+description: Run the aislop quality gate on AI-assisted code (scan + fail CI below threshold from .aislop/config.yml).
+author: scanaislop
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  directory:
+    description: Directory to scan.
+    required: false
+    default: "."
+  node-version:
+    description: Node.js version to install before running aislop.
+    required: false
+    default: "24"
+  format:
+    description: Output format — "json" (default, CI-friendly) or "human".
+    required: false
+    default: "json"
+  version:
+    description: npm aislop CLI version to run (e.g. "0.10.1"). Defaults to the latest published release. This is separate from the GitHub Action ref in uses:.
+    required: false
+    default: "latest"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Run aislop ci
+      shell: bash
+      env:
+        AISLOP_FORMAT: ${{ inputs.format }}
+        AISLOP_VERSION: ${{ inputs.version }}
+        AISLOP_DIR: ${{ inputs.directory }}
+      run: |
+        scan_dir="$AISLOP_DIR"
+        if [[ "$scan_dir" != /* ]]; then
+          scan_dir="$GITHUB_WORKSPACE/$scan_dir"
+        fi
+
+        args=("ci" "$scan_dir")
+        if [ "$AISLOP_FORMAT" = "human" ]; then
+          args+=("--human")
+        fi
+
+        npm_exec_dir="$(mktemp -d)"
+        trap 'rm -rf "$npm_exec_dir"' EXIT
+        cd "$npm_exec_dir"
+        npm exec --yes --package "aislop@${AISLOP_VERSION}" -- aislop "${args[@]}"

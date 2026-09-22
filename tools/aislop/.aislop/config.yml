@@ -1,0 +1,45 @@
+version: 1
+
+# editors/ is an isolated VS Code extension package with its own manifest;
+# it imports the host-provided `vscode` module, so exclude it from the root scan.
+exclude:
+  - node_modules
+  - .git
+  - dist
+  - build
+  - coverage
+  - editors
+
+engines:
+  format: true
+  lint: true
+  code-quality: true
+  ai-slop: true
+  architecture: false
+  security: true
+
+quality:
+  maxFunctionLoc: 80
+  maxFileLoc: 400
+  maxNesting: 5
+  maxParams: 6
+
+security:
+  audit: true
+  auditTimeout: 25000
+
+scoring:
+  weights:
+    format: 0.5
+    lint: 1.0
+    code-quality: 1.5
+    ai-slop: 1.0
+    architecture: 1.0
+    security: 2.0
+  thresholds:
+    good: 75
+    ok: 50
+
+ci:
+  failBelow: 0
+  format: json

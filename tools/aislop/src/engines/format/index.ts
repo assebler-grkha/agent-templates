@@ -1,0 +1,81 @@
+import type { Diagnostic, Engine, EngineContext, EngineResult } from "../types.js";
+import { runBiomeFormat } from "./biome.js";
+import { runClangFormat } from "./clang-format.js";
+import { runDotnetFormat } from "./dotnet-format.js";
+import { runGenericFormatter } from "./generic.js";
+import { runGofmt } from "./gofmt.js";
+import { runRuffFormat } from "./ruff-format.js";
+
+export const formatEngine: Engine = {
+	name: "format",
+
+	async run(context: EngineContext): Promise<EngineResult> {
+		const diagnostics: Diagnostic[] = [];
+		const { languages, installedTools } = context;
+
+		const promises: Promise<Diagnostic[]>[] = [];
+
+		if (languages.includes("typescript") || languages.includes("javascript")) {
+			promises.push(runBiomeFormat(context));
+		}
+
+		if (languages.includes("python") && installedTools.ruff) {
+			promises.push(runRuffFormat(context));
+		}
+
+		if (languages.includes("go") && installedTools.gofmt) {
+			promises.push(runGofmt(context));
+		}
+
+		if (languages.includes("rust") && installedTools.rustfmt) {
+			promises.push(runGenericFormatter(context, "rust"));
+		}
+
+		if (languages.includes("ruby") && installedTools.rubocop) {
+			promises.push(runGenericFormatter(context, "ruby"));
+		}
+
+		if (languages.includes("php") && installedTools["php-cs-fixer"]) {
+			promises.push(runGenericFormatter(context, "php"));
+		}
+
+		if (
+			languages.includes("csharp") &&
+			installedTools.dotnet &&
+			context.config.lint.csharp?.projectEvaluation === true
+		) {
+			promises.push(runDotnetFormat(context));
+		}
+
+		if (languages.includes("cpp") && installedTools["clang-format"]) {
+			promises.push(runClangFormat(context));
+		}
+
+		// No formatter matched the detected languages/installed tools. Report this as
+		// skipped (mirroring `doctor`) rather than returning an empty result, which the
+		// scan summary would otherwise launder into a misleading "done (0 issues)".
+		if (promises.length === 0) {
+			return {
+				engine: "format",
+				diagnostics,
+				elapsed: 0,
+				skipped: true,
+				skipReason: "no formatter for the detected languages",
+			};
+		}
+
+		const results = await Promise.allSettled(promises);
+		for (const result of results) {
+			if (result.status === "fulfilled") {
+				diagnostics.push(...result.value);
+			}
+		}
+
+		return {
+			engine: "format",
+			diagnostics,
+			elapsed: 0,
+			skipped: false,
+		};
+	},
+};

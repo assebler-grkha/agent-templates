@@ -1,0 +1,46 @@
+import fs from "node:fs";
+import path from "node:path";
+import { DEFAULT_CONFIG } from "./defaults.js";
+import { loadConfigChain } from "./extends.js";
+import { type AislopConfig, parseConfig } from "./schema.js";
+
+export const CONFIG_DIR = ".aislop";
+export const CONFIG_FILE = "config.yml";
+export const RULES_FILE = "rules.yml";
+
+export const findConfigDir = (startDir: string, stopAt?: string): string | null => {
+	let current = path.resolve(startDir);
+	const boundary = stopAt ? path.resolve(stopAt) : null;
+	while (true) {
+		const candidate = path.join(current, CONFIG_DIR);
+		if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+			return candidate;
+		}
+		if (boundary && current === boundary) break;
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return null;
+};
+
+export const loadConfig = (directory: string): AislopConfig => {
+	const configDir = findConfigDir(directory);
+	if (!configDir) return DEFAULT_CONFIG;
+
+	const configPath = path.join(configDir, CONFIG_FILE);
+	if (!fs.existsSync(configPath)) return DEFAULT_CONFIG;
+
+	try {
+		const merged = loadConfigChain(configPath);
+		return parseConfig(merged);
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		process.stderr.write(
+			`  ⚠ Failed to parse ${configPath}: ${msg}\n  ⚠ Using default configuration.\n`,
+		);
+		return DEFAULT_CONFIG;
+	}
+};
+
+export type { AislopConfig } from "./schema.js";

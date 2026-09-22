@@ -1,0 +1,15 @@
+# Tool sources & vendored projects
+tools/
+tools/**
+
+# Template workspaces (standalone blueprints with their own package.json)
+workspaces/
+workspaces/**
+
+# OpenCode plugins (evaluated inside OpenCode runtime)
+plugins/
+plugins/**
+
+# Scratchpad
+scratch/
+scratch/**

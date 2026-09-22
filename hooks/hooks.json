@@ -1,0 +1,12 @@
+{
+  "workspace-auto-init": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python \"C:/Agent templates/scripts/hook-pre-invocation.py\"",
+        "timeout": 20
+      }
+    ]
+  }
+}

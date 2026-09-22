@@ -1,0 +1,954 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { detectRiskyConstructs } from "../src/engines/security/risky.js";
+import { scanSecrets } from "../src/engines/security/secrets.js";
+import type { EngineContext } from "../src/engines/types.js";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+let tmpDir: string;
+
+const makeContext = (files?: string[]): EngineContext => ({
+	rootDirectory: tmpDir,
+	languages: ["typescript"],
+	frameworks: ["none"],
+	...(files === undefined ? {} : { files }),
+	installedTools: {},
+	config: {
+		quality: {
+			maxFunctionLoc: 80,
+			maxFileLoc: 400,
+			maxNesting: 4,
+			maxParams: 6,
+		},
+		security: { audit: true, auditTimeout: 25000 },
+	},
+});
+
+const writeFile = (filename: string, content: string): string => {
+	const filePath = path.join(tmpDir, filename);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, content, "utf-8");
+	return filePath;
+};
+
+beforeEach(() => {
+	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aislop-security-"));
+});
+
+afterEach(() => {
+	fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ─── scanSecrets ──────────────────────────────────────────────────────────────
+
+describe("scanSecrets", () => {
+	it("returns no diagnostics for a clean file", async () => {
+		const filePath = writeFile(
+			"clean.ts",
+			"export function add(a: number, b: number) { return a + b; }",
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("detects a hardcoded API key", async () => {
+		const filePath = writeFile("config.ts", 'const apiKey = "abcdefghijklmnopqrstu12345";');
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/hardcoded-secret");
+		expect(diagnostics[0].severity).toBe("error");
+		expect(diagnostics[0].engine).toBe("security");
+	});
+
+	it("detects secret values that contain placeholder-like text", async () => {
+		const filePath = writeFile(
+			"placeholder-looking-secrets.ts",
+			[
+				'const apiKey = "your_abcdefghijklmnopqrstu12345";',
+				'const password = "prod-env(db)-password";',
+				'const secret = "prod-${tenant}-secret";',
+				'const passwd = "process.env.REAL_PASSWORD";',
+				'const pwd = "<prod-password-value>";',
+			].join("\n"),
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/hardcoded-secret")).toHaveLength(5);
+	});
+
+	it("detects secrets in public assets during project-wide scans", async () => {
+		writeFile("public/config.js", 'const apiKey = "abcdefghijklmnopqrstu12345";');
+
+		const diagnostics = await scanSecrets(makeContext());
+
+		expect(diagnostics.some((d) => d.filePath === "public/config.js")).toBe(true);
+	});
+
+	it("detects secrets in timestamp-named JavaScript during project-wide scans", async () => {
+		writeFile("src/config.timestamp-123-abc.js", 'const apiKey = "abcdefghijklmnopqrstu12345";');
+
+		const diagnostics = await scanSecrets(makeContext());
+
+		expect(diagnostics.some((d) => d.filePath === "src/config.timestamp-123-abc.js")).toBe(true);
+	});
+
+	it("detects an AWS Access Key ID", async () => {
+		const filePath = writeFile("aws.ts", "const accessKeyId = 'AKIAIOSFODNN7EXAMPLE';");
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("AWS Access Key");
+	});
+
+	it("detects a hardcoded password", async () => {
+		const filePath = writeFile("db.ts", 'const password = "super-secret-password-123";');
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("password");
+	});
+
+	it("does not flag keyword-prefixed matches inside string-literal prose (log calls)", async () => {
+		const filePath = writeFile(
+			"actions.ts",
+			[
+				"async function update() {",
+				"  try {",
+				"    await db.set();",
+				"  } catch (error) {",
+				'    console.error("Error verifying video password:", error);',
+				'    console.log("API key rotation failed:", error);',
+				"    log.warn(`token refresh: ${err.message}`);",
+				"  }",
+				"}",
+			].join("\n"),
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("still flags the same keywords when they are real identifiers", async () => {
+		const filePath = writeFile(
+			"mixed.ts",
+			[
+				'const password = "super-secret-password-123";',
+				'console.error("Error verifying video password:", error);',
+			].join("\n"),
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0].line).toBe(1);
+	});
+
+	it("does not treat UI password labels as hardcoded secrets", async () => {
+		const filePath = writeFile(
+			"password-label.tsx",
+			[
+				"export const PasswordField = ({ hasPassword }: { hasPassword: boolean }) => (",
+				"  <input",
+				'    type="password"',
+				'    placeholder={hasPassword ? "Enter new password" : "Set a password"}',
+				"  />",
+				");",
+			].join("\n"),
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("detects uppercase token constants with provider prefixes", async () => {
+		const filePath = writeFile(
+			"tokens.ts",
+			'const AXIOM_API_TOKEN = "xaat-c0704be6-e942-4935-b068-3b491d7cc00f";',
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("Authentication token");
+	});
+
+	it("detects a private key header", async () => {
+		const filePath = writeFile(
+			"keys.ts",
+			"const key = `-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...`;",
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("Private key");
+	});
+
+	it("detects a JWT token", async () => {
+		const filePath = writeFile(
+			"auth.ts",
+			// A realistic-looking (fake) JWT
+			'const jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";',
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("JWT");
+	});
+
+	it("detects a database connection string with credentials", async () => {
+		const filePath = writeFile(
+			"db-url.ts",
+			'const dbUrl = "postgres://user:password123@localhost:5432/mydb";',
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("Database connection string");
+	});
+
+	it("does not flag placeholder database URLs in example maps", async () => {
+		const filePath = writeFile(
+			"redaction-examples.ts",
+			"const examples = { db: 'postgres://user:pw@host' };",
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("detects a GitHub token", async () => {
+		const filePath = writeFile(
+			"github.ts",
+			`const ghToken = '${"gh" + "p_"}${"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk"}';`,
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		// The token may be matched by either the GitHub-specific or generic token pattern
+		const messages = diagnostics.map((d) => d.message);
+		const matched = messages.some(
+			(m) => m.includes("GitHub token") || m.includes("Authentication token"),
+		);
+		expect(matched).toBe(true);
+	});
+
+	it("detects a Slack token", async () => {
+		const filePath = writeFile(
+			"slack.ts",
+			`const slackToken = '${"xo" + "xb"}-123456789012-1234567890123-abcdefghijklmnopqrstuvwx';`,
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		// The token may be matched by either the Slack-specific or generic token pattern
+		const messages = diagnostics.map((d) => d.message);
+		const matched = messages.some(
+			(m) => m.includes("Slack token") || m.includes("Authentication token"),
+		);
+		expect(matched).toBe(true);
+	});
+
+	it("reports relative file paths", async () => {
+		const filePath = writeFile("subdir/config.ts", 'const apiKey = "abcdefghijklmnopqrstu12345";');
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(path.isAbsolute(diagnostics[0].filePath)).toBe(false);
+	});
+
+	it("reports correct line numbers for secrets", async () => {
+		const filePath = writeFile(
+			"lines.ts",
+			"const a = 1;\nconst b = 2;\nconst password = 'hunter2hunter2';\nconst c = 3;",
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].line).toBe(3);
+	});
+
+	it("marks diagnostics as not fixable", async () => {
+		const filePath = writeFile("fix.ts", 'const apiKey = "abcdefghijklmnopqrstu12345";');
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].fixable).toBe(false);
+	});
+
+	it("category is Security", async () => {
+		const filePath = writeFile("cat.ts", 'const apiKey = "abcdefghijklmnopqrstu12345";');
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].category).toBe("Security");
+	});
+
+	it("returns empty array when files list is empty", async () => {
+		const diagnostics = await scanSecrets(makeContext([]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("detects generic authentication token", async () => {
+		const filePath = writeFile("token.ts", 'const token = "abcdefghijklmnopqrstu12345ABCD";');
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].message).toContain("token");
+	});
+
+	it("handles multiple secrets in the same file", async () => {
+		const filePath = writeFile(
+			"multi.ts",
+			[
+				'const apiKey = "abcdefghijklmnopqrstu12345";',
+				"const awsKey = 'AKIAIOSFODNN7EXAMPLE';",
+			].join("\n"),
+		);
+		const diagnostics = await scanSecrets(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(2);
+	});
+});
+
+// ─── detectRiskyConstructs ────────────────────────────────────────────────────
+
+describe("detectRiskyConstructs", () => {
+	it("returns no diagnostics for a clean file", async () => {
+		const filePath = writeFile(
+			"clean.ts",
+			"export function safeOp(data: unknown) { return JSON.parse(JSON.stringify(data)); }",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("detects eval() in TypeScript", async () => {
+		const filePath = writeFile("eval.ts", "const result = eval('1 + 1');");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/eval");
+		expect(diagnostics[0].severity).toBe("error");
+		expect(diagnostics[0].engine).toBe("security");
+	});
+
+	it("detects eval() in JavaScript", async () => {
+		const filePath = writeFile("eval.js", "eval('console.log(1)');");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/eval");
+	});
+
+	it("detects risky constructs in public assets during project-wide scans", async () => {
+		writeFile("public/vuln.js", "eval(userInput);");
+
+		const diagnostics = await detectRiskyConstructs(makeContext());
+
+		expect(
+			diagnostics.some((d) => d.filePath === "public/vuln.js" && d.rule === "security/eval"),
+		).toBe(true);
+	});
+
+	it("detects risky constructs in timestamp-named JavaScript during project-wide scans", async () => {
+		writeFile("src/vuln.timestamp-123-abc.js", "eval(userInput);");
+
+		const diagnostics = await detectRiskyConstructs(makeContext());
+
+		expect(
+			diagnostics.some(
+				(d) => d.filePath === "src/vuln.timestamp-123-abc.js" && d.rule === "security/eval",
+			),
+		).toBe(true);
+	});
+
+	it("does not flag 'evaluate' as eval", async () => {
+		const filePath = writeFile(
+			"evaluate.ts",
+			"function evaluate(expr: string) { return parseFloat(expr); }",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(0);
+	});
+
+	it("does not flag method-call eval forms ('->eval', '::eval', '.eval')", async () => {
+		const phpPath = writeFile(
+			"redis-queue.php",
+			"<?php $this->getConnection()->eval(LuaScripts::push(), 2, $queue);",
+		);
+		const rubyPath = writeFile("repl.rb", "binding.eval(line)");
+		const jsPath = writeFile("obj.js", "self.eval(input);");
+		const phpStaticPath = writeFile("class.php", "<?php Container::eval($code);");
+		const diagnostics = await detectRiskyConstructs(
+			makeContext([phpPath, rubyPath, jsPath, phpStaticPath]),
+		);
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(0);
+	});
+
+	it("still flags top-level eval() in PHP", async () => {
+		const filePath = writeFile("dynamic.php", "<?php eval($userCode);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags.length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("detects new Function() in TypeScript", async () => {
+		const filePath = writeFile("fn.ts", "const fn = new Function('x', 'return x * 2');");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/new-function");
+	});
+
+	it("detects innerHTML assignment in TypeScript", async () => {
+		const filePath = writeFile("dom.ts", "element.innerHTML = userInput;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/innerhtml");
+	});
+
+	it("detects dangerouslySetInnerHTML in TSX", async () => {
+		const filePath = writeFile(
+			"comp.tsx",
+			"return <div dangerouslySetInnerHTML={{ __html: content }} />;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/dangerously-set-innerhtml");
+	});
+
+	it("does NOT detect dangerouslySetInnerHTML in .ts files (only tsx/jsx)", async () => {
+		const filePath = writeFile("comp.ts", "const html = dangerouslySetInnerHTML;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const dsiDiags = diagnostics.filter((d) => d.rule === "security/dangerously-set-innerhtml");
+		expect(dsiDiags).toHaveLength(0);
+	});
+
+	it("detects pickle.load in Python", async () => {
+		const filePath = writeFile("serialize.py", "import pickle\ndata = pickle.loads(raw_bytes)");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/pickle-load");
+	});
+
+	it("detects exec() in Python", async () => {
+		const filePath = writeFile("exec_test.py", "exec('import os; os.system(\"ls\")')");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/python-exec");
+	});
+
+	it("does not flag method-call exec forms ('session.exec', 'obj.eval')", async () => {
+		const sqlmodelPath = writeFile("query.py", "results = session.exec(stmt).all()");
+		const dottedExecPath = writeFile("regex_test.py", "match = re.compile(p).exec(text)");
+		const dottedEvalPath = writeFile("repl.py", "value = obj.eval(expr)");
+		const diagnostics = await detectRiskyConstructs(
+			makeContext([sqlmodelPath, dottedExecPath, dottedEvalPath]),
+		);
+		const flagged = diagnostics.filter(
+			(d) => d.rule === "security/python-exec" || d.rule === "security/eval",
+		);
+		expect(flagged).toHaveLength(0);
+	});
+
+	it("still flags bare exec() in Python after the method-call guard", async () => {
+		const filePath = writeFile("bare_exec.py", 'exec("import os")');
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const execDiags = diagnostics.filter((d) => d.rule === "security/python-exec");
+		expect(execDiags.length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("detects SQL injection via template literal", async () => {
+		const filePath = writeFile(
+			"sql.ts",
+			"const rows = await db.query(`SELECT * FROM users WHERE id = ${userId}`);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].rule).toBe("security/sql-injection");
+	});
+
+	it("reports correct line numbers", async () => {
+		const filePath = writeFile(
+			"lines.ts",
+			"const a = 1;\nconst b = 2;\neval('bad code');\nconst c = 3;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].line).toBe(3);
+	});
+
+	it("does not flag Python patterns in .ts files", async () => {
+		const filePath = writeFile("not-python.ts", "// pickle.loads(data)\n");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const pickleDiags = diagnostics.filter((d) => d.rule === "security/pickle-load");
+		expect(pickleDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag eval() inside a double-quoted string literal", async () => {
+		const filePath = writeFile(
+			"label.ts",
+			'const labels = { "security/eval-usage": "eval() call" };',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag eval() inside a single-quoted string literal", async () => {
+		const filePath = writeFile("single.ts", "const msg = 'eval() is dangerous';");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag eval() inside a line comment", async () => {
+		const filePath = writeFile("comment.ts", "// never call eval() on user input\nconst x = 1;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag eval() inside a block comment", async () => {
+		const filePath = writeFile("block.ts", "/* warning: eval() is unsafe */\nconst x = 1;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(0);
+	});
+
+	it("DOES flag eval() inside a template literal interpolation", async () => {
+		const filePath = writeFile("interp.ts", "const result = `Hello ${eval(userInput)}`;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags.length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("does NOT flag SQL-injection-looking template literal inside a string", async () => {
+		const filePath = writeFile(
+			"fake-sql.ts",
+			'const doc = "db.query(`SELECT * FROM u WHERE id = ${id}`)";',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag innerHTML = inside a comment", async () => {
+		const filePath = writeFile(
+			"inner-comment.ts",
+			"// element.innerHTML = userInput;\nconst x = 1;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag innerHTML clears or direct sanitizer assignment", async () => {
+		const filePath = writeFile(
+			"inner-safe.ts",
+			[
+				"container.innerHTML = '';",
+				"panel.innerHTML = escapeHtml(userInput);",
+				"modal.innerHTML = DOMPurify.sanitize(markdownHtml);",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("still flags sanitized innerHTML mixed with unsanitized concatenation", async () => {
+		const filePath = writeFile(
+			"inner-mixed.ts",
+			"container.innerHTML = escapeHtml(title) + rawHtml;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(1);
+	});
+
+	it("still flags unsafe HTML passed through a safe-looking variable chain", async () => {
+		const filePath = writeFile(
+			"inner-mixed-variable.ts",
+			[
+				"const safeTitle = escapeHtml(title);",
+				"const unsafeMarkup = safeTitle + rawHtml;",
+				"container.innerHTML = unsafeMarkup;",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(1);
+	});
+
+	it("still flags mutable safe-looking HTML variables", async () => {
+		const filePath = writeFile(
+			"inner-mutable-variable.ts",
+			["let safeMarkup = '';", "safeMarkup = rawHtml;", "container.innerHTML = safeMarkup;"].join(
+				"\n",
+			),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(1);
+	});
+
+	it("does NOT flag static HTML literals or templates with escaped interpolations", async () => {
+		const filePath = writeFile(
+			"inner-template-safe.ts",
+			[
+				"const statusClass = ok ? 'ok' : 'err';",
+				"const safeName = escapeHtml(user.name);",
+				"container.innerHTML = '<div class=\"empty\">No results</div>';",
+				"if (!box) { boxEl.innerHTML = '<span>No data</span>'; return; }",
+				"arrow.innerHTML = expanded ? '&#x25BC;' : '&#x25B6;';",
+				'row.innerHTML = `<span class="${statusClass}">${safeName}</span>`;',
+				"list.innerHTML = rows.map(row => `<span>${escapeHtml(row.name)}</span>`).join('');",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag safe numeric and formatter-only innerHTML templates", async () => {
+		const filePath = writeFile(
+			"inner-template-numeric.ts",
+			[
+				"const refText = refCount > 0 ? ` · ${refCount} refs` : '';",
+				'pill.innerHTML = `<span class="dot"></span> status${refText}`;',
+				"box.innerHTML = `<span>${fmtBoxVal(m.top)}</span><span>${Math.round(size.width || 0)}</span>`;",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag safe HTML accumulators with escaped appends", async () => {
+		const filePath = writeFile(
+			"inner-accumulator-safe.ts",
+			[
+				"let html = '';",
+				"for (const prop of editableProps) {",
+				"  const val = computed[prop] || '';",
+				"  html += `<span data-prop=\"${escapeHtml(prop)}\">${escapeHtml(val || '(none)')}</span>`;",
+				"}",
+				"html += '<div class=\"footer\">Done</div>';",
+				"panel.innerHTML = html;",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("still flags unsafe HTML accumulators with raw appends", async () => {
+		const filePath = writeFile(
+			"inner-accumulator-unsafe.ts",
+			["let html = '';", "html += `<span>${user.name}</span>`;", "panel.innerHTML = html;"].join(
+				"\n",
+			),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(1);
+	});
+
+	it("still flags innerHTML templates with raw interpolated values", async () => {
+		const filePath = writeFile(
+			"inner-template-raw.ts",
+			"container.innerHTML = `<span>${user.name}</span>`;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(1);
+	});
+
+	it("preserves correct line numbers after masking (eval on line 4)", async () => {
+		const filePath = writeFile(
+			"lines-masked.ts",
+			'const a = "eval() mention";\n// eval() here too\nconst b = 2;\neval(bad);',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const evalDiags = diagnostics.filter((d) => d.rule === "security/eval");
+		expect(evalDiags).toHaveLength(1);
+		expect(evalDiags[0].line).toBe(4);
+	});
+
+	it("marks diagnostics as not fixable", async () => {
+		const filePath = writeFile("fix.ts", "eval('risky');");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].fixable).toBe(false);
+	});
+
+	it("category is Security", async () => {
+		const filePath = writeFile("cat.ts", "eval('risky');");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+		expect(diagnostics[0].category).toBe("Security");
+	});
+
+	it("returns empty array when files list is empty", async () => {
+		const diagnostics = await detectRiskyConstructs(makeContext([]));
+		expect(diagnostics).toHaveLength(0);
+	});
+
+	it("does NOT flag template.innerHTML as XSS", async () => {
+		const filePath = writeFile(
+			"template.ts",
+			"const template = document.createElement('template');\ntemplate.innerHTML = html;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag tmpl.innerHTML as XSS (template variable naming)", async () => {
+		const filePath = writeFile("tmpl.ts", "tmpl.innerHTML = sanitizedHtml;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(0);
+	});
+
+	it("still flags non-template innerHTML as XSS", async () => {
+		const filePath = writeFile("div.ts", "div.innerHTML = userInput;");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const innerHtmlDiags = diagnostics.filter((d) => d.rule === "security/innerhtml");
+		expect(innerHtmlDiags).toHaveLength(1);
+	});
+
+	it("detects multiple risky constructs in the same file", async () => {
+		const filePath = writeFile("multi.ts", "eval('bad');\nelement.innerHTML = userInput;\n");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("detects shell injection via template interpolation in command execution", async () => {
+		const filePath = writeFile("shell.ts", "child_process.exec(`rm -rf ${target}`);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const matches = diagnostics.filter((d) => d.rule === "security/shell-injection");
+		expect(matches).toHaveLength(1);
+		expect(matches[0].severity).toBe("error");
+	});
+
+	it("does NOT flag array-form spawn arguments as shell injection", async () => {
+		const filePath = writeFile(
+			"spawn-array.ts",
+			"Bun.spawn(['tasklist', '/FI', `IMAGENAME eq ${exe}`, '/NH']);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const matches = diagnostics.filter((d) => d.rule === "security/shell-injection");
+		expect(matches).toHaveLength(0);
+	});
+
+	it("still flags shell-string spawn interpolation", async () => {
+		const filePath = writeFile("spawn-shell.ts", "spawn(`rm -rf ${target}`);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const matches = diagnostics.filter((d) => d.rule === "security/shell-injection");
+		expect(matches).toHaveLength(1);
+	});
+
+	it("still flags array-form spawn when it invokes a shell", async () => {
+		const filePath = writeFile("spawn-array-shell.ts", "Bun.spawn(['sh', '-c', `rm ${target}`]);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const matches = diagnostics.filter((d) => d.rule === "security/shell-injection");
+		expect(matches).toHaveLength(1);
+	});
+
+	it("detects SQL injection via knex.raw template literal", async () => {
+		const filePath = writeFile(
+			"knex.ts",
+			"const rows = await knex.raw(`SELECT * FROM users WHERE id = ${userId}`);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags.length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("detects SQL injection in migration and seeder paths", async () => {
+		const migrationFile = writeFile(
+			"src/migrations/runtime-helper.ts",
+			"const rows = await db.query(`SELECT * FROM users WHERE id = ${userId}`);",
+		);
+		const seederFile = writeFile(
+			"src/seeders/runtime-helper.ts",
+			"const rows = await db.query(`SELECT * FROM users WHERE id = ${userId}`);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([migrationFile, seederFile]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(2);
+		expect(sqlDiags.map((d) => d.filePath).sort()).toEqual([
+			"src/migrations/runtime-helper.ts",
+			"src/seeders/runtime-helper.ts",
+		]);
+	});
+
+	it("detects SQL injection via chained DB member (client.pool.query)", async () => {
+		const filePath = writeFile(
+			"chained.ts",
+			"const rows = await client.pool.query(`SELECT * FROM users WHERE id = ${userId}`);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags.length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("does NOT flag generated SQL placeholder lists when values are passed separately", async () => {
+		const filePath = writeFile(
+			"placeholder-list.ts",
+			[
+				"const placeholders = domains.map(() => '?').join(',');",
+				"const rows = db.query(`SELECT * FROM cookies WHERE host_key IN (${placeholders})`, domains);",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag sqlite prepared statements with generated placeholder lists", async () => {
+		const filePath = writeFile(
+			"sqlite-placeholder-list.ts",
+			[
+				"const placeholders = domains.map(() => '?').join(',');",
+				"const rows = db.query(`SELECT * FROM cookies WHERE host_key IN (${placeholders})`).all(...domains);",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(0);
+	});
+
+	it("still flags placeholder-named SQL fragments without generated placeholder provenance", async () => {
+		const filePath = writeFile(
+			"placeholder-raw-fragment.ts",
+			[
+				"const placeholders = rawWhereClause;",
+				"const rows = db.query(`SELECT * FROM cookies WHERE ${placeholders}`, domains);",
+			].join("\n"),
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(1);
+	});
+
+	it("does NOT flag log.raw(`...${x}`) as SQL injection", async () => {
+		const filePath = writeFile("log.ts", "log.raw(`rendered ${count} lines`);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag console.log(`...${x}`) as SQL injection", async () => {
+		const filePath = writeFile("console.ts", "console.log(`hello ${name}`);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(0);
+	});
+
+	it("does NOT flag bare query(`...${x}`) as SQL injection (no DB receiver)", async () => {
+		const filePath = writeFile("bare.ts", "query(`SELECT * FROM users WHERE id = ${userId}`);");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		const sqlDiags = diagnostics.filter((d) => d.rule === "security/sql-injection");
+		expect(sqlDiags).toHaveLength(0);
+	});
+
+	// ── C# ──────────────────────────────────────────────────────────────────
+	it("detects a C# interpolated SQL string in a SqlCommand", async () => {
+		const filePath = writeFile(
+			"Repo.cs",
+			'var cmd = new SqlCommand($"SELECT * FROM Users WHERE Id = {id}", conn);',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/sql-injection")).toHaveLength(1);
+	});
+
+	it("detects a C# concatenated SQL string on CommandText", async () => {
+		const filePath = writeFile(
+			"Repo.cs",
+			'cmd.CommandText = "SELECT * FROM Users WHERE Id = " + id;',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/sql-injection")).toHaveLength(1);
+	});
+
+	it("detects a C# interpolated string in EF Core FromSqlRaw", async () => {
+		const filePath = writeFile(
+			"Repo.cs",
+			'var users = context.Users.FromSqlRaw($"SELECT * FROM Users WHERE Name = {name}");',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/sql-injection")).toHaveLength(1);
+	});
+
+	it("does NOT flag EF Core FromSqlInterpolated (parameter-safe)", async () => {
+		const filePath = writeFile(
+			"Repo.cs",
+			'var users = context.Users.FromSqlInterpolated($"SELECT * FROM Users WHERE Name = {name}");',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/sql-injection")).toHaveLength(0);
+	});
+
+	it("does NOT flag a C# SQL keyword sitting in a comment", async () => {
+		const filePath = writeFile(
+			"Repo.cs",
+			'// new SqlCommand($"SELECT {x}") would be unsafe, so we do not do it\nvar safe = 1;',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/sql-injection")).toHaveLength(0);
+	});
+
+	it("detects C# command injection via interpolated Process.Start", async () => {
+		const filePath = writeFile("Runner.cs", 'Process.Start($"ping {host}");');
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/shell-injection")).toHaveLength(1);
+	});
+
+	it("detects C# command injection via concatenated Arguments", async () => {
+		const filePath = writeFile("Runner.cs", 'psi.Arguments = "-n 1 " + userSuppliedHost;');
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/shell-injection")).toHaveLength(1);
+	});
+
+	it("detects C# unsafe BinaryFormatter deserialization", async () => {
+		const filePath = writeFile(
+			"Loader.cs",
+			"var formatter = new BinaryFormatter();\nvar obj = formatter.Deserialize(stream);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/unsafe-deserialization")).toHaveLength(1);
+	});
+
+	// ── C / C++ ─────────────────────────────────────────────────────────────
+	it("detects a C++ system() call", async () => {
+		const filePath = writeFile("main.cpp", "int rc = system(cmd.c_str());");
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/shell-injection")).toHaveLength(1);
+	});
+
+	it("detects a qualified std::system() call but not a member access .system()", async () => {
+		const filePath = writeFile(
+			"main.cpp",
+			"std::system(cmd);\nmyRunner.system(cmd);\nobj->system(cmd);",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/shell-injection")).toHaveLength(1);
+	});
+
+	it("detects unsafe C string functions in a .cpp file", async () => {
+		const filePath = writeFile(
+			"buf.cpp",
+			'strcpy(dest, src);\nsprintf(buf, "%s", src);\ngets(line);',
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/unsafe-c-call")).toHaveLength(3);
+	});
+
+	it("does NOT flag bounded C string functions (snprintf/strncpy)", async () => {
+		const filePath = writeFile("buf.cpp", 'snprintf(buf, n, "%s", src);\nstrncpy(dest, src, n);');
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/unsafe-c-call")).toHaveLength(0);
+	});
+
+	it("detects unsafe string functions in a C++ header (.hpp)", async () => {
+		const filePath = writeFile(
+			"inline.hpp",
+			"inline void copy(char* d, const char* s) { strcpy(d, s); }",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/unsafe-c-call")).toHaveLength(1);
+	});
+
+	it("does NOT flag system() mentioned in a C++ comment", async () => {
+		const filePath = writeFile(
+			"main.cpp",
+			"// never call system() with untrusted input\nint x = 1;",
+		);
+		const diagnostics = await detectRiskyConstructs(makeContext([filePath]));
+		expect(diagnostics.filter((d) => d.rule === "security/shell-injection")).toHaveLength(0);
+	});
+});

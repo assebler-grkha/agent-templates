@@ -1,0 +1,53 @@
+name: Update contributors
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  contributors:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Render contributors
+        id: render
+        run: |
+          node .github/scripts/render-contributors.mjs
+          if [ -n "$(git status --porcelain README.md)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push refresh branch
+        if: steps.render.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B bot/contributors-update
+          git add README.md
+          git commit -m "docs(contributors): refresh from git history"
+          git push --force origin bot/contributors-update
+          {
+            echo "### Contributors updated"
+            echo ""
+            echo "Pushed to \`bot/contributors-update\`. Open a PR from the GitHub UI to merge: https://github.com/${{ github.repository }}/compare/${{ github.ref_name }}...bot/contributors-update?expand=1"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No-op summary
+        if: steps.render.outputs.changed == 'false'
+        run: echo "No contributor changes." >> "$GITHUB_STEP_SUMMARY"

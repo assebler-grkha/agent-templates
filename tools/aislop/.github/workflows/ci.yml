@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to run CI against"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test-matrix:
+    name: Build & test (${{ matrix.os }}, ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [22, 24]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm vitest run
+
+  # Stable required-check names. Branch protection matches status checks by exact string, so
+  # "Build & test (22)" and "Build & test (24)" must keep those names; we expose them as thin
+  # gates over the OS/node matrix above. Adding a platform thus never renames a required check
+  # (a renamed required check hangs as "Expected" and blocks every PR). The always() + explicit
+  # result check is deliberate: a gate that merely skips on matrix failure counts as *passing*
+  # in branch protection, which would let a red matrix merge.
+  check:
+    name: Build & test
+    needs: test-matrix
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - name: Require the OS/node test matrix to pass
+        run: |
+          if [ "${{ needs.test-matrix.result }}" != "success" ]; then
+            echo "Build & test matrix did not pass: ${{ needs.test-matrix.result }}"
+            exit 1
+          fi
+          echo "All Build & test matrix legs passed."
+
+  quality-gate:
+    name: Quality gate
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: aislop ci
+        run: node dist/cli.js ci .
+
+  dotnet-lint:
+    name: C# lint integration
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.1.0
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install roslynator CLI
+        run: dotnet tool install -g roslynator.dotnet.cli --version 0.12.0
+
+      - name: Restore trusted C# fixture
+        run: dotnet restore tests/fixtures/dotnet/sample-project/Sample.csproj --locked-mode
+
+      - name: Build
+        run: pnpm build
+
+      - name: Scan sample C# project and assert dotnet diagnostics appear
+        run: |
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          node dist/cli.js scan tests/fixtures/dotnet/sample-project --json > scan.json || true
+          cat scan.json
+          grep -q '"dotnet/' scan.json
