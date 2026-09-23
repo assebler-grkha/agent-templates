@@ -21,19 +21,29 @@ def sync_git_repo(repo_dir: str, message: str) -> None:
     if not os.path.isdir(git_dir):
         return
 
-    res_add = subprocess.run(
-        ["git", "add", "."], cwd=repo_dir, capture_output=True, text=True
-    )
-    if res_add.returncode != 0:
-        sys.stderr.write(f"Git add warning: {res_add.stderr}\n")
-        return
+    try:
+        res_add = subprocess.run(
+            ["git", "add", "."],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if res_add.returncode != 0:
+            sys.stderr.write(f"Git add warning: {res_add.stderr}\n")
+            return
 
-    subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    )
+        subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as err:
+        sys.stderr.write(f"Git sync warning: {err}\n")
 
 
 def register_project_domain(

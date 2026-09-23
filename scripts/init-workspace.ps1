@@ -167,30 +167,51 @@ if (-not (Test-Path $TargetReadme)) {
 $RegisterScript = Join-Path $ScriptDir "register-agentdb-domain.py"
 if (Test-Path $RegisterScript) {
     Write-Host "  [*] Регистрация домена проекта в AgentDB..." -ForegroundColor Yellow
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $regOutput = python $RegisterScript --project "$ProjectName" --path "$($ResolvedTarget.Path)" --stack "$ProjectStack" 2>&1
-    Write-Host "  $regOutput" -ForegroundColor Gray
+    $ErrorActionPreference = $prevEAP
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [!] Предупреждение регистрации AgentDB: $regOutput" -ForegroundColor Yellow
+    } else {
+        Write-Host "  $regOutput" -ForegroundColor Gray
+    }
 }
 
 # 6. Обязательная инициализация Git и подключение к Remote
 $GitDir = Join-Path $ResolvedTarget ".git"
+$targetPathStr = "$($ResolvedTarget.Path)"
+
+# Удаление случайных артефактов Windows перенаправления (nul, $null), ломающих Git
+$badFiles = @("nul", "`$null")
+foreach ($bf in $badFiles) {
+    $bfPath = "\\?\$targetPathStr\$bf"
+    if ([System.IO.File]::Exists($bfPath)) {
+        try { [System.IO.File]::Delete($bfPath) } catch {}
+    }
+}
+
 if (-not (Test-Path $GitDir)) {
     Write-Host "  [*] Инициализация Git-репозитория..." -ForegroundColor Yellow
-    git -C $ResolvedTarget init -b main | Out-Null
-    git -C $ResolvedTarget add . | Out-Null
-    git -C $ResolvedTarget commit -m "chore: initial project scaffold, rules, and docs" | Out-Null
+    git -C "$targetPathStr" init -b main | Out-Null
+    git -C "$targetPathStr" add . | Out-Null
+    git -C "$targetPathStr" commit -m "chore: initial project scaffold, rules, and docs" | Out-Null
     Write-Host "  [+] Git репозиторий инициализирован, создан первый коммит в ветке 'main'" -ForegroundColor Green
 } else {
-    git -C $ResolvedTarget add . | Out-Null
-    git -C $ResolvedTarget commit -m "chore: update agent workspace templates and rules" -q 2>$null | Out-Null
+    git -C "$targetPathStr" add . | Out-Null
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    git -C "$targetPathStr" commit -m "chore: update agent workspace templates and rules" -q | Out-Null
+    $ErrorActionPreference = $prevEAP
 }
 
 if ($GitRemoteUrl) {
     Write-Host "  [*] Подключение к remote: $GitRemoteUrl" -ForegroundColor Yellow
-    $existingRemotes = git -C $ResolvedTarget remote
+    $existingRemotes = git -C "$targetPathStr" remote
     if ($existingRemotes -contains "origin") {
-        git -C $ResolvedTarget remote set-url origin $GitRemoteUrl
+        git -C "$targetPathStr" remote set-url origin $GitRemoteUrl
     } else {
-        git -C $ResolvedTarget remote add origin $GitRemoteUrl
+        git -C "$targetPathStr" remote add origin $GitRemoteUrl
     }
     Write-Host "  [+] Remote 'origin' успешно настроен: $GitRemoteUrl" -ForegroundColor Green
 } else {
