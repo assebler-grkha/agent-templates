@@ -3,17 +3,35 @@ import os
 import subprocess
 import sys
 
-# Ensure UTF-8 output on Windows consoles
+# Ensure UTF-8 I/O on Windows consoles
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 
+def is_ignored_dir(path: str) -> bool:
+    if not path:
+        return True
+    norm = os.path.normpath(path).lower().rstrip("\\/")
+    # Root drive check (e.g. "c:", "c:\")
+    drive, rest = os.path.splitdrive(norm)
+    if not rest or rest in ("\\", "/"):
+        return True
+    # User profile home directory check
+    home = os.path.normpath(os.environ.get("USERPROFILE", "")).lower().rstrip("\\/")
+    if home and norm == home:
+        return True
+    return False
+
+
 def main():
     try:
         raw_input = sys.stdin.read()
-        payload = json.loads(raw_input) if raw_input.strip() else {}
+        cleaned = raw_input.strip().lstrip("\ufeff")
+        payload = json.loads(cleaned) if cleaned else {}
     except (json.JSONDecodeError, UnicodeDecodeError):
         # Fallback to empty response if invalid input
         sys.stdout.write(json.dumps({"injectSteps": []}))
@@ -25,6 +43,10 @@ def main():
         return
 
     target_dir = os.path.normpath(workspace_paths[0])
+    if is_ignored_dir(target_dir):
+        sys.stdout.write(json.dumps({"injectSteps": []}))
+        return
+
     agents_path = os.path.join(target_dir, "AGENTS.md")
     gemini_path = os.path.join(target_dir, "GEMINI.md")
     claude_path = os.path.join(target_dir, "CLAUDE.md")
@@ -56,12 +78,20 @@ def main():
             "-ProjectName",
             project_name,
         ]
-        subprocess.run(
+        res = subprocess.run(
             cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
+        if res.returncode != 0:
+            err_msg = (
+                res.stderr.strip()
+                or res.stdout.strip()
+                or f"exit code {res.returncode}"
+            )
+            raise RuntimeError(err_msg)
 
         message = (
             f"[Autonomous Auto-Init] Проект '{project_name}' успешно инициализирован до первого шага: "
@@ -69,7 +99,7 @@ def main():
         )
         sys.stdout.write(json.dumps({"injectSteps": [{"ephemeralMessage": message}]}))
     except Exception as err:
-        notice = f"[Auto-Init Notice] Обнаружен чистый проект '{project_name}'. Инициализируйте правила AGENTS.md. ({err})"
+        notice = f"[Auto-Init Notice] Обнаружен чистый проект '{project_name}'. Ошибка автоинициализации: {err}"
         sys.stdout.write(json.dumps({"injectSteps": [{"ephemeralMessage": notice}]}))
 
 
