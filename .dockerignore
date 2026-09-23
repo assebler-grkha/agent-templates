@@ -1,0 +1,63 @@
+# Version Control
+.git
+.gitignore
+
+# Dependencies (will be reinstalled inside the container)
+node_modules
+vendor
+.venv
+env
+
+# Build outputs & caches
+dist
+build
+out
+.next
+.cache
+.turbo
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+coverage
+
+# Databases & Dumps
+*.sql
+*.dump
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+
+# Project Documentation & Agent Instructions (Not needed in container)
+docs
+AGENTS.md
+GEMINI.md
+CLAUDE.md
+README.md
+
+# Agent Scratchpad & Diagnostics
+scratch
+tmp
+temp
+*.log
+
+# Tests (Run outside or in separate test runner image)
+tests
+__tests__
+*.test.*
+*.spec.*
+
+# Secrets & Environment variables
+.env*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+.idea
+.vscode
