@@ -36,7 +36,7 @@ description: Управление проектной документацией,
 - Когда все пункты в `docs/plans/{phase}_plan.md` отмечены `[x]`:
   1. Изменить статус в шапке на `Status: Completed`.
   2. Переместить файл в `docs/archive/{phase}_plan.md`.
-  3. Сохранить краткий итог вехи в `AgentDB` (`store_memory(key="{project}_{phase}_completed", project="{project_name}")`).
+  3. Сохранить краткий итог вехи в `AgentDB` (`agentdb_store(key="{project}_{phase}_completed", project="{project_name}")`).
   4. Обновить поле `Current Focus` в `AGENTS.md` на следующую задачу.
 
 ### 5. Использование `scratch/`

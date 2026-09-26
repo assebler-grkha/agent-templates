@@ -42,6 +42,16 @@ if (-not $ProjectName) {
 
 $Today = (Get-Date).ToString("yyyy-MM-dd")
 
+function Join-Parts {
+    # Windows PowerShell 5.1 принимает у Join-Path только 2 позиционных аргумента
+    # (multi-child появился в PS 6+): сворачиваем цепочку вручную. Работает везде.
+    $result = $args[0]
+    for ($i = 1; $i -lt $args.Count; $i++) {
+        $result = Join-Path $result $args[$i]
+    }
+    return $result
+}
+
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " Инициализация рабочего пространства для ИИ-агентов        " -ForegroundColor Cyan
 Write-Host " Проект: $ProjectName | Стек: $ProjectStack"
@@ -71,14 +81,14 @@ Write-Host "  [+] Создана структура папок docs/ и лабо
 
 # 2. Развертывание документации, индексов и шаблонов
 $DocsDir = Join-Path $ResolvedTarget "docs"
-$TemplatesSource = Join-Path $BaseDir "workspaces\minimal-agentic\docs\templates"
+$TemplatesSource = Join-Parts $BaseDir "workspaces" "minimal-agentic" "docs" "templates"
 $TemplatesTarget = Join-Path $DocsDir "templates"
 
 $CopyMap = @{
-    (Join-Path $BaseDir "workspaces\minimal-agentic\docs\architecture\overview.md") = (Join-Path $DocsDir "architecture\overview.md")
-    (Join-Path $BaseDir "workspaces\minimal-agentic\docs\decisions\0001-initial-architecture.md") = (Join-Path $DocsDir "decisions\0001-initial-architecture.md")
-    (Join-Path $BaseDir "workspaces\minimal-agentic\docs\navigation-index.md") = (Join-Path $DocsDir "navigation-index.md")
-    (Join-Path $BaseDir "workspaces\minimal-agentic\docs\notes-index.md") = (Join-Path $DocsDir "notes-index.md")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" "docs" "architecture" "overview.md") = (Join-Parts $DocsDir "architecture" "overview.md")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" "docs" "decisions" "0001-initial-architecture.md") = (Join-Parts $DocsDir "decisions" "0001-initial-architecture.md")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" "docs" "navigation-index.md") = (Join-Path $DocsDir "navigation-index.md")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" "docs" "notes-index.md") = (Join-Path $DocsDir "notes-index.md")
 }
 
 foreach ($src in $CopyMap.Keys) {
@@ -114,7 +124,7 @@ if ($UseDynamic) {
         "gemini" { "DYNAMIC_GEMINI.template.md" }
         "claude" { "DYNAMIC_CLAUDE.template.md" }
     }
-    $DynamicTemplatePath = Join-Path $BaseDir "rules\$DynamicTemplateName"
+    $DynamicTemplatePath = Join-Parts $BaseDir "rules" $DynamicTemplateName
     if (Test-Path $DynamicTemplatePath) {
         $templateContent = Get-Content -Path $DynamicTemplatePath -Raw -Encoding UTF8
         $rendered = $templateContent.Replace("{{PROJECT_NAME}}", $ProjectName)
@@ -125,7 +135,7 @@ if ($UseDynamic) {
         Write-Host "  [+] Сгенерирован динамический файл правил: $RuleFileName (< 3.5 КБ)" -ForegroundColor Green
     }
 } else {
-    $SourceRuleTemplate = Join-Path $BaseDir "rules\$($RuleFileName.Replace('.md', '.template.md'))"
+    $SourceRuleTemplate = Join-Parts $BaseDir "rules" ($RuleFileName.Replace('.md', '.template.md'))
     if (Test-Path $SourceRuleTemplate) {
         Copy-Item -Path $SourceRuleTemplate -Destination $TargetRuleFile -Force
         Write-Host "  [+] Развернут файл правил: $RuleFileName" -ForegroundColor Green
@@ -134,9 +144,9 @@ if ($UseDynamic) {
 
 # 4. Файловая гигиена: .gitignore, .dockerignore, .env.example, README.md
 $HygieneMap = @{
-    (Join-Path $BaseDir "workspaces\minimal-agentic\.gitignore.template") = (Join-Path $ResolvedTarget ".gitignore")
-    (Join-Path $BaseDir "workspaces\minimal-agentic\.dockerignore.template") = (Join-Path $ResolvedTarget ".dockerignore")
-    (Join-Path $BaseDir "workspaces\minimal-agentic\.env.example.template") = (Join-Path $ResolvedTarget ".env.example")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" ".gitignore.template") = (Join-Path $ResolvedTarget ".gitignore")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" ".dockerignore.template") = (Join-Path $ResolvedTarget ".dockerignore")
+    (Join-Parts $BaseDir "workspaces" "minimal-agentic" ".env.example.template") = (Join-Path $ResolvedTarget ".env.example")
 }
 
 foreach ($src in $HygieneMap.Keys) {
@@ -150,7 +160,7 @@ foreach ($src in $HygieneMap.Keys) {
 # Генерация README.md если отсутствует
 $TargetReadme = Join-Path $ResolvedTarget "README.md"
 if (-not (Test-Path $TargetReadme)) {
-    $ReadmeTemplate = Join-Path $BaseDir "workspaces\minimal-agentic\README.template.md"
+    $ReadmeTemplate = Join-Parts $BaseDir "workspaces" "minimal-agentic" "README.template.md"
     if (Test-Path $ReadmeTemplate) {
         $readmeContent = Get-Content -Path $ReadmeTemplate -Raw -Encoding UTF8
         $readmeRendered = $readmeContent.Replace("{{PROJECT_NAME}}", $ProjectName)
@@ -167,18 +177,31 @@ if (-not (Test-Path $TargetReadme)) {
 $RegisterScript = Join-Path $ScriptDir "register-agentdb-domain.py"
 if (Test-Path $RegisterScript) {
     Write-Host "  [*] Регистрация домена проекта в AgentDB..." -ForegroundColor Yellow
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $regOutput = python $RegisterScript --project "$ProjectName" --path "$($ResolvedTarget.Path)" --stack "$ProjectStack" 2>&1
-    $ErrorActionPreference = $prevEAP
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  [!] Предупреждение регистрации AgentDB: $regOutput" -ForegroundColor Yellow
+    $PythonCmd = Get-Command "python" -ErrorAction SilentlyContinue
+    if (-not $PythonCmd) { $PythonCmd = Get-Command "python3" -ErrorAction SilentlyContinue }
+    if (-not $PythonCmd) {
+        Write-Host "  [!] Python не найден, пропуск регистрации AgentDB." -ForegroundColor Yellow
     } else {
-        Write-Host "  $regOutput" -ForegroundColor Gray
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $regOutput = & $PythonCmd.Source $RegisterScript --project "$ProjectName" --path "$($ResolvedTarget.Path)" --stack "$ProjectStack" 2>&1
+        $ErrorActionPreference = $prevEAP
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [!] Предупреждение регистрации AgentDB: $regOutput" -ForegroundColor Yellow
+        } else {
+            Write-Host "  $regOutput" -ForegroundColor Gray
+        }
     }
 }
 
 # 6. Обязательная инициализация Git и подключение к Remote
+# Git может отсутствовать на машине: тогда секция пропускается целиком,
+# а хук PreInvocation напомнит агенту предложить установку (маркер ниже).
+$GitCmd = Get-Command "git" -ErrorAction SilentlyContinue
+if (-not $GitCmd) {
+    Write-Host "  [!] Git не найден в PATH: шаги git init/commit/remote пропущены. Установите git и выполните их вручную." -ForegroundColor Yellow
+    Write-Output "AGENT_INIT_GIT_SKIPPED"
+} else {
 $GitDir = Join-Path $ResolvedTarget ".git"
 $targetPathStr = "$($ResolvedTarget.Path)"
 
@@ -195,8 +218,16 @@ if (-not (Test-Path $GitDir)) {
     Write-Host "  [*] Инициализация Git-репозитория..." -ForegroundColor Yellow
     git -C "$targetPathStr" init -b main | Out-Null
     git -C "$targetPathStr" add . | Out-Null
-    git -C "$targetPathStr" commit -m "chore: initial project scaffold, rules, and docs" | Out-Null
-    Write-Host "  [+] Git репозиторий инициализирован, создан первый коммит в ветке 'main'" -ForegroundColor Green
+    # Коммит не должен ронять весь скрипт при отсутствии identity/изменений
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    git -C "$targetPathStr" commit -m "chore: initial project scaffold, rules, and docs" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [!] Git commit пропущен (проверьте user.name/user.email): файлы проиндексированы через 'git add'." -ForegroundColor Yellow
+    } else {
+        Write-Host "  [+] Git репозиторий инициализирован, создан первый коммит в ветке 'main'" -ForegroundColor Green
+    }
+    $ErrorActionPreference = $prevEAP
 } else {
     git -C "$targetPathStr" add . | Out-Null
     $prevEAP = $ErrorActionPreference
@@ -217,5 +248,6 @@ if ($GitRemoteUrl) {
 } else {
     Write-Host "  [!] ВНИМАНИЕ: Git Remote URL не указан. Агент обязан запросить данные для подключения у пользователя." -ForegroundColor Yellow
 }
+} # end else (git present)
 
 Write-Host "==> Workspace '$ProjectName' полностью подготовлен к работе с агентами!" -ForegroundColor Green

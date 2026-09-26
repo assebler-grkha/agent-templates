@@ -11,9 +11,33 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-ANTIGRAVITY_DIR = r"C:\Users\Gregory\.gemini\agentdb_sync"
-ANTIGRAVITY_DB = os.path.join(ANTIGRAVITY_DIR, "agent_memory.db")
-OPENCODE_DB = r"C:\Users\Gregory\.opencode-mcp\pathfinder-app\.agentdb\pathfinder.db"
+
+def _default_antigravity_db() -> str:
+    base = os.environ.get("ANTIGRAVITY_SYNC_DIR") or os.path.join(
+        os.path.expanduser("~"), ".gemini", "agentdb_sync"
+    )
+    return os.path.join(base, "agent_memory.db")
+
+
+def _default_opencode_db() -> str:
+    override = os.environ.get("OPENCODE_AGENTDB_PATH")
+    if override:
+        return override
+    return os.path.join(
+        os.path.expanduser("~"),
+        ".opencode-mcp",
+        "pathfinder-app",
+        ".agentdb",
+        "pathfinder.db",
+    )
+
+
+ANTIGRAVITY_DIR = os.environ.get(
+    "ANTIGRAVITY_SYNC_DIR",
+    os.path.join(os.path.expanduser("~"), ".gemini", "agentdb_sync"),
+)
+ANTIGRAVITY_DB = os.environ.get("ANTIGRAVITY_DB_PATH", _default_antigravity_db())
+OPENCODE_DB = _default_opencode_db()
 
 
 def sync_git_repo(repo_dir: str, message: str) -> None:
@@ -91,7 +115,7 @@ def register_project_domain(
         except sqlite3.Error as err:
             sys.stderr.write(f"[AgentDB Error] Ошибка agent_memory.db: {err}\n")
 
-    # 2. Запись в OpenCode pathfinder.db
+    # 2. Запись в OpenCode pathfinder.db (без создания пустого файла как побочного эффекта)
     if os.path.exists(OPENCODE_DB):
         try:
             metadata_str = json.dumps(
@@ -104,24 +128,35 @@ def register_project_domain(
             )
             with sqlite3.connect(OPENCODE_DB) as conn:
                 c = conn.cursor()
-                existing = c.execute(
-                    "SELECT id FROM documents WHERE id = ?", (key,)
-                ).fetchone()
-                if existing:
-                    c.execute(
-                        "UPDATE documents SET content = ?, metadata = ?, created_at = ? WHERE id = ?",
-                        (content, metadata_str, now_iso, key),
+                tables = {
+                    row[0]
+                    for row in c.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                if "documents" not in tables:
+                    sys.stderr.write(
+                        "[AgentDB Error] В pathfinder.db нет таблицы 'documents', пропуск.\n"
                     )
                 else:
-                    c.execute(
-                        "INSERT INTO documents (id, domain, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (key, project_name, content, metadata_str, now_iso),
+                    existing = c.execute(
+                        "SELECT id FROM documents WHERE id = ?", (key,)
+                    ).fetchone()
+                    if existing:
+                        c.execute(
+                            "UPDATE documents SET content = ?, metadata = ? WHERE id = ?",
+                            (content, metadata_str, key),
+                        )
+                    else:
+                        c.execute(
+                            "INSERT INTO documents (id, domain, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (key, project_name, content, metadata_str, now_iso),
+                        )
+                    conn.commit()
+                    print(
+                        f"[AgentDB/OpenCode] Домен '{project_name}' зарегистрирован в pathfinder.db (id: '{key}')."
                     )
-                conn.commit()
-            print(
-                f"[AgentDB/OpenCode] Домен '{project_name}' зарегистрирован в pathfinder.db (id: '{key}')."
-            )
-            registered_any = True
+                    registered_any = True
         except sqlite3.Error as err:
             sys.stderr.write(f"[AgentDB Error] Ошибка pathfinder.db: {err}\n")
 

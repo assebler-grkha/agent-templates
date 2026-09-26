@@ -21,6 +21,6 @@ description: Быстрая подготовка нового или сущес�
    - **Запрос у пользователя**: Спросить URL удаленного репозитория: *"Укажите URL remote репозитория (GitHub/GitLab) для подключения origin:"*.
    - Выполнить `git remote add origin <url>` и `git push -u origin main`.
 4. **Регистрация в AgentDB**:
-   - Регистрация домена проекта `{project_name}_init_meta` в `agent_memory` через `store_memory`.
+   - Регистрация домена проекта `{project_name}_init_meta` в `agentdb` через `agentdb_store`.
 5. **Финальный аудит**:
    - Запуск `scripts/audit-context.ps1` для подтверждения отсутствия ошибок и соблюдения лимитов.

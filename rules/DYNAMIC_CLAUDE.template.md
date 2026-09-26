@@ -14,7 +14,7 @@ Inherits: global user_rules (3-Tier Search, No Greedy Reads, YAGNI, Aislop)
 - Detailed Symbol & File Map: [docs/navigation-index.md](docs/navigation-index.md)
 - Operational Notes & Decisions: [docs/notes-index.md](docs/notes-index.md)
 - Debt Registry Query: `rg "AGENT:(MOCK|STUB|HARDCODE)"`
-- AgentDB Domain: `{{PROJECT_NAME}}` (query via search_memory / agentdb_search)
+- AgentDB Domain: `{{PROJECT_NAME}}` (query via agentdb_search / agentdb_search)
 <!-- ZONE: INDEX_POINTERS: END -->
 
 <!-- ZONE: DYNAMIC: NAVIGATION: START -->

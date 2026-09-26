@@ -29,13 +29,12 @@ if (-not (Test-Path $GitignorePath)) {
     Write-Host "[FAIL] Отсутствует файл .gitignore! Агенты могут читать кэши и зависимости." -ForegroundColor Red
     $IssuesFound++
 } else {
-    $GitignoreContent = Get-Content $GitignorePath -Raw
+    $GitignoreLines = @(Get-Content $GitignorePath | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" -and (-not $_.StartsWith("#")) })
     $CrucialPatterns = @("node_modules", "dist", "build", "*.log", ".env", "scratch")
     $MissingPatterns = @()
     foreach ($pattern in $CrucialPatterns) {
-        if ($GitignoreContent -notmatch [regex]::Escape($pattern)) {
-            $MissingPatterns += $pattern
-        }
+        $found = $GitignoreLines | Where-Object { $_ -eq $pattern -or $_ -eq "/$pattern" }
+        if (-not $found) { $MissingPatterns += $pattern }
     }
     if ($MissingPatterns.Count -gt 0) {
         $missingStr = $MissingPatterns -join ', '
@@ -67,7 +66,16 @@ if (-not (Test-Path $EnvExamplePath)) {
 }
 
 if (Test-Path $EnvPath) {
-    if ((Test-Path $GitignorePath) -and ((Get-Content $GitignorePath -Raw) -notmatch "\.env")) {
+    $envCovered = $false
+    if (Test-Path $GitignorePath) {
+        # Построчная проверка: '.env.example' НЕ покрывает '.env'.
+        # Покрытием считается строка '.env', '/.env', '.env*', '**/.env' и т.п.
+        $ignoreLines = @(Get-Content $GitignorePath | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" -and (-not $_.StartsWith("#")) })
+        foreach ($line in $ignoreLines) {
+            if ($line -match '^\s*(/?\*\*/)?\.env(\*?|\/)?\s*$' -or $line -match '^\s*/\.env(\*?)\s*$') { $envCovered = $true; break }
+        }
+    }
+    if (-not $envCovered) {
         Write-Host "[FAIL] Файл .env существует, но НЕ добавлен в .gitignore! Риск утечки секретов." -ForegroundColor Red
         $IssuesFound++
     }
@@ -124,13 +132,18 @@ if ($FoundRules.Count -eq 0) {
 
 # 6. Поиск тяжелых файлов (> 250 КБ) вне gitignore/исключений
 Write-Host "`nСканирование на тяжелые файлы (> 250 КБ)..." -ForegroundColor Cyan
-$HeavyFiles = Get-ChildItem -Path $ResolvedPath -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { 
+$HeavyFiles = Get-ChildItem -Path $ResolvedPath.Path -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
         $_.FullName -notmatch '\\node_modules\\' -and
         $_.FullName -notmatch '\\\.git\\' -and
         $_.FullName -notmatch '\\dist\\' -and
         $_.FullName -notmatch '\\build\\' -and
         $_.FullName -notmatch '\\scratch\\' -and
+        $_.FullName -notmatch '\\tools\\aislop\\' -and
+        $_.FullName -notmatch '\\\.agentdb\\' -and
+        $_.FullName -notmatch '\\\.opencode' -and
+        $_.FullName -notmatch '\\coverage\\' -and
+        $_.Name -notlike '*.log' -and
         $_.Length -gt 256000
     } | Select-Object -First 10
 
@@ -154,7 +167,7 @@ if (-not (Test-Path $GitDir)) {
     $IssuesFound++
 } else {
     Write-Host "[OK] Локальный репозиторий Git инициализирован." -ForegroundColor Green
-    $remotes = git -C $ResolvedPath.Path remote -v 2>$null
+    $remotes = git -C "$($ResolvedPath.Path)" remote -v 2>$null
     if (-not $remotes) {
         Write-Host "[WARN] Remote 'origin' не подключен! Агент обязан запросить Remote URL у пользователя." -ForegroundColor Yellow
         $Warnings++
@@ -169,3 +182,7 @@ $statusColor = if ($IssuesFound -gt 0) { "Red" } elseif ($Warnings -gt 0) { "Yel
 Write-Host "`n------------------------------------------"
 Write-Host ("Итог аудита: Ошибок: {0}, Предупреждений: {1}" -f $IssuesFound, $Warnings) -ForegroundColor $statusColor
 Write-Host "------------------------------------------`n"
+
+# Ненулевой код для использования в CI-гейтах
+if ($IssuesFound -gt 0) { exit 1 }
+exit 0

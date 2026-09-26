@@ -1,7 +1,12 @@
+import contextlib
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 # Ensure UTF-8 I/O on Windows consoles
 if hasattr(sys.stdin, "reconfigure"):
@@ -27,6 +32,92 @@ def is_ignored_dir(path: str) -> bool:
     return False
 
 
+BACKOFF_TTL_SECONDS = 24 * 3600
+
+# Ephemeral notice for initialized workspaces on machines without git.
+# Never persisted to rule files: it vanishes on its own once git appears.
+GIT_MISSING_NOTICE = (
+    "[Auto-Init Notice] В проекте есть правила, но на этой машине не найден git: "
+    "шаги git init/commit/remote при инициализации были пропущены. "
+    "Предложи пользователю установить git, затем выполни git init -b main, "
+    "первый коммит и подключение remote вручную."
+)
+
+
+def _backoff_path(target_dir: str) -> str:
+    digest = hashlib.sha1(
+        os.path.normpath(target_dir).encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    return os.path.join(
+        tempfile.gettempdir(), f"agent-templates-auto-init-{digest}.marker"
+    )
+
+
+def backoff_active(target_dir: str) -> bool:
+    try:
+        mtime = os.path.getmtime(_backoff_path(target_dir))
+    except OSError:
+        return False
+    return (time.time() - mtime) < BACKOFF_TTL_SECONDS
+
+
+def backoff_mark(target_dir: str) -> None:
+    # Best-effort marker: an unwritable temp dir must never break the hook.
+    with contextlib.suppress(OSError):
+        with open(_backoff_path(target_dir), "w", encoding="utf-8") as fh:
+            fh.write(str(int(time.time())))
+
+
+def backoff_clear(target_dir: str) -> None:
+    # Best-effort cleanup, same rationale as backoff_mark.
+    with contextlib.suppress(OSError):
+        os.remove(_backoff_path(target_dir))
+
+
+def select_init_command(script_dir: str, target_dir: str, project_name: str):
+    """Choose the platform init script.
+
+    Windows prefers init-workspace.ps1 (powershell.exe/pwsh);
+    POSIX prefers init-workspace.sh (bash/sh) with pwsh+.ps1 fallback.
+    Returns (cmd, label) or (None, searched_paths) when nothing is usable.
+    """
+    ps1 = os.path.join(script_dir, "init-workspace.ps1")
+    sh = os.path.join(script_dir, "init-workspace.sh")
+    ps_args = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ps1,
+        "-TargetPath",
+        target_dir,
+        "-ProjectName",
+        project_name,
+    ]
+    sh_args = [sh, "-t", target_dir, "-n", project_name]
+    if os.name == "nt":
+        if os.path.exists(ps1):
+            shell = (
+                shutil.which("powershell.exe")
+                or shutil.which("pwsh")
+                or "powershell.exe"
+            )
+            return ([shell] + ps_args, "init-workspace.ps1")
+        shell = shutil.which("bash")
+        if shell and os.path.exists(sh):
+            return ([shell] + sh_args, "init-workspace.sh")
+        return (None, ps1 + " / " + sh)
+    if os.path.exists(sh):
+        shell = shutil.which("bash") or shutil.which("sh")
+        if shell:
+            return ([shell] + sh_args, "init-workspace.sh")
+    if os.path.exists(ps1):
+        shell = shutil.which("pwsh")
+        if shell:
+            return ([shell] + ps_args, "init-workspace.ps1")
+    return (None, sh + " / " + ps1)
+
+
 def main():
     try:
         raw_input = sys.stdin.read()
@@ -42,49 +133,69 @@ def main():
         sys.stdout.write(json.dumps({"injectSteps": []}))
         return
 
-    target_dir = os.path.normpath(workspace_paths[0])
-    if is_ignored_dir(target_dir):
+    # PreInvocation fires before EVERY model call. Run the expensive init
+    # only on the first invocation; later turns are silent no-ops.
+    # (Missing key = older contract: proceed as before.)
+    invocation_num = payload.get("invocationNum")
+    if invocation_num is not None and invocation_num != 0:
         sys.stdout.write(json.dumps({"injectSteps": []}))
         return
 
-    agents_path = os.path.join(target_dir, "AGENTS.md")
-    gemini_path = os.path.join(target_dir, "GEMINI.md")
-    claude_path = os.path.join(target_dir, "CLAUDE.md")
-
-    # If project already initialized, do nothing
-    if (
-        os.path.exists(agents_path)
-        or os.path.exists(gemini_path)
-        or os.path.exists(claude_path)
-    ):
+    # Multi-root: init the first non-ignored root that lacks rule files.
+    # Each root is an independent project and gets its own turn.
+    targets = [
+        os.path.normpath(p) for p in workspace_paths if p and not is_ignored_dir(p)
+    ]
+    if not targets:
         sys.stdout.write(json.dumps({"injectSteps": []}))
         return
 
-    # Project is uninitialized: trigger init-workspace.ps1
+    rule_files = ("AGENTS.md", "GEMINI.md", "CLAUDE.md")
+    pending = [
+        d
+        for d in targets
+        if not any(os.path.exists(os.path.join(d, rf)) for rf in rule_files)
+    ]
+    if not pending:
+        # Workspace is initialized. The only machine-state check that still
+        # makes sense here: git binary missing (init skips git steps then).
+        if shutil.which("git") is None:
+            sys.stdout.write(
+                json.dumps({"injectSteps": [{"ephemeralMessage": GIT_MISSING_NOTICE}]})
+            )
+            return
+        sys.stdout.write(json.dumps({"injectSteps": []}))
+        return
+    target_dir = pending[0]
+
+    if backoff_active(target_dir):
+        # A recent attempt already failed — stay silent instead of
+        # injecting the same error before every model call.
+        sys.stdout.write(json.dumps({"injectSteps": []}))
+        return
+
+    # Project is uninitialized: trigger the platform init script (.ps1/.sh)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    init_script = os.path.join(script_dir, "init-workspace.ps1")
     project_name = os.path.basename(target_dir)
-
+    backoff_mark(target_dir)
+    selected = select_init_command(script_dir, target_dir, project_name)
+    if selected[0] is None:
+        notice = f"[Auto-Init Notice] Обнаружен чистый проект '{project_name}'. Скрипт инициализации не найден: {selected[1]}"
+        sys.stdout.write(json.dumps({"injectSteps": [{"ephemeralMessage": notice}]}))
+        return
+    cmd, script_label = selected
     try:
-        cmd = [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            init_script,
-            "-TargetPath",
-            target_dir,
-            "-ProjectName",
-            project_name,
-        ]
-        res = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"превышен таймаут 15с при запуске {script_label}")
         if res.returncode != 0:
             err_msg = (
                 res.stderr.strip()
@@ -93,12 +204,21 @@ def main():
             )
             raise RuntimeError(err_msg)
 
+        git_skipped = "AGENT_INIT_GIT_SKIPPED" in (res.stdout or "")
         message = (
             f"[Autonomous Auto-Init] Проект '{project_name}' успешно инициализирован до первого шага: "
-            f"созданы AGENTS.md, docs/, навигационные индексы, Git и домен в AgentDB."
+            f"созданы AGENTS.md, docs/, навигационные индексы и домен в AgentDB."
+            + (
+                " Git на этой машине не найден: шаги git init/commit/remote пропущены. "
+                "Предложи пользователю установить git."
+                if git_skipped
+                else " Git-репозиторий и remote настроены."
+            )
         )
+        backoff_clear(target_dir)
         sys.stdout.write(json.dumps({"injectSteps": [{"ephemeralMessage": message}]}))
     except Exception as err:
+        backoff_mark(target_dir)
         notice = f"[Auto-Init Notice] Обнаружен чистый проект '{project_name}'. Ошибка автоинициализации: {err}"
         sys.stdout.write(json.dumps({"injectSteps": [{"ephemeralMessage": notice}]}))
 

@@ -25,7 +25,7 @@ description: Протокол автономного ведения и акту�
    - Выбрать самую старую запись.
    - Экспортировать ее в `AgentDB`:
      ```text
-     store_memory(
+     agentdb_store(
        key="{project}_gotcha_{topic}",
        content="...",
        category="archived_gotchas",

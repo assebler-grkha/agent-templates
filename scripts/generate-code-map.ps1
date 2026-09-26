@@ -17,14 +17,15 @@ if (-not $ResolvedPath) {
     exit 1
 }
 
-$ExcludeDirs = @("node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo", "__pycache__", ".venv", "vendor", "scratch", ".ruff_cache", ".pytest_cache", ".mypy_cache", ".idea", ".vscode", ".agentdb", "coverage")
+$ExcludeDirs = @("node_modules", ".git", "dist", "build", ".next", ".cache", ".turbo", "__pycache__", ".venv", "vendor", "scratch", ".ruff_cache", ".pytest_cache", ".mypy_cache", ".idea", ".vscode", ".agentdb", ".opencode", "coverage", "tools")
+$ExcludeFiles = @("*.log", "*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
 
 function Get-Tree($currentDir, $currentDepth, $prefix = "") {
     if ($currentDepth -gt $MaxDepth) { return }
 
-    $items = Get-ChildItem -Path $currentDir -ErrorAction SilentlyContinue |
-        Where-Object { $ExcludeDirs -notcontains $_.Name } |
-        Sort-Object { -not $_.PSIsContainer }, Name
+    $items = @(Get-ChildItem -Path $currentDir -ErrorAction SilentlyContinue |
+        Where-Object { ($ExcludeDirs -notcontains $_.Name) -and ($ExcludeFiles -notcontains $_.Name) -and ($_.Name -notlike "*.log") } |
+        Sort-Object { -not $_.PSIsContainer }, Name)
 
     $count = $items.Count
     $i = 0
