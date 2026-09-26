@@ -1,8 +1,8 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { findConfigDir, loadConfig, RULES_FILE } from "../config/index.js";
+import { fixCommand } from "../commands/fix.js";
 import { runEngines } from "../engines/orchestrator.js";
 import type { Diagnostic, EngineContext, EngineName } from "../engines/types.js";
 import { readBaseline } from "../hooks/quality-gate/baseline.js";
@@ -158,33 +158,43 @@ export const aislopFixInputSchema = z.object({
 		),
 });
 
-interface SpawnOk {
+interface LocalFixResult {
 	exitCode: number;
-	stdout: string;
 	stderr: string;
 }
 
-const runAislopFix = (cwd: string, force: boolean): Promise<SpawnOk> => {
-	const args = ["fix"];
-	if (force) args.push("--force");
-	return new Promise((resolve) => {
-		// spawn() args bypass the shell — no injection surface. We hardcode "latest" anyway.
-		const child = spawn("npx", ["--yes", "aislop@latest", ...args], {
-			cwd,
-			env: { ...process.env, NO_COLOR: "1" },
+// fixCommand renders human-readable progress UI straight to process.stdout,
+// which would corrupt the MCP stdio transport (stdout must stay pure
+// JSON-RPC). Run the vendored fix in-process with stdout muted and telemetry
+// off, so our fork (with the AGENT-marker rules) applies the fixes instead of
+// a network-fetched upstream copy.
+const runLocalFix = async (cwd: string, force: boolean): Promise<LocalFixResult> => {
+	const config = loadConfig(cwd);
+	const originalWrite = process.stdout.write.bind(process.stdout);
+	const prevCi = process.env.CI;
+	const prevNoTelemetry = process.env.AISLOP_NO_TELEMETRY;
+	process.env.CI = "1"; // force non-TTY LiveRail rendering
+	process.env.AISLOP_NO_TELEMETRY = "1";
+	process.stdout.write = (() => true) as typeof process.stdout.write;
+	try {
+		const result = await fixCommand(cwd, config, {
+			verbose: false,
+			showHeader: false,
+			printBrand: false,
+			force,
 		});
-		const stdout: Buffer[] = [];
-		const stderr: Buffer[] = [];
-		child.stdout?.on("data", (b) => stdout.push(b as Buffer));
-		child.stderr?.on("data", (b) => stderr.push(b as Buffer));
-		child.on("close", (code) =>
-			resolve({
-				exitCode: code ?? 0,
-				stdout: Buffer.concat(stdout).toString("utf-8"),
-				stderr: Buffer.concat(stderr).toString("utf-8"),
-			}),
-		);
-	});
+		return { exitCode: result.exitCode, stderr: "" };
+	} catch (error) {
+		// A fix failure must never kill the MCP server process (the old
+		// spawn-based version crashed the whole server on ENOENT).
+		return { exitCode: 1, stderr: error instanceof Error ? error.message : String(error) };
+	} finally {
+		process.stdout.write = originalWrite;
+		if (prevCi === undefined) delete process.env.CI;
+		else process.env.CI = prevCi;
+		if (prevNoTelemetry === undefined) delete process.env.AISLOP_NO_TELEMETRY;
+		else process.env.AISLOP_NO_TELEMETRY = prevNoTelemetry;
+	}
 };
 
 export const aislopFixTool = {
@@ -197,7 +207,7 @@ export const aislopFixTool = {
 export const handleAislopFix = async (input: z.infer<typeof aislopFixInputSchema>) => {
 	const cwd = resolveCwd(input.path);
 	const before = await runScan(cwd);
-	const fixResult = await runAislopFix(cwd, Boolean(input.force));
+	const fixResult = await runLocalFix(cwd, Boolean(input.force));
 	const after = await runScan(cwd);
 
 	const fixedCount = Math.max(0, before.diagnostics.length - after.diagnostics.length);
