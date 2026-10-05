@@ -4,12 +4,12 @@
 .DESCRIPTION
   Разворачивает автоматизацию из клона репозитория в машину:
   0. Проверка prerequisites (git, python, node, rtk) - только предупреждения.
-  1. Стабильный рантайм -> $RuntimeDir (~/.agent-templates): скрипты и dist aislop.
+  1. Стабильный рантайм -> $RuntimeDir (~/.agent-templates): скрипты, dist aislop, сервер agentdb.
      Рантайм НЕ зависит от папки клона: клон можно удалить/переместить.
   2. Antigravity: хук PreInvocation -> ~/.gemini/config/hooks.json (merge по ключу).
   3. OpenCode: плагины -> ~/.config/opencode/plugins/ (включая rtk.ts).
   4. Скиллы -> ~/.config/opencode/skills/ и ~/.gemini/config/skills/.
-  5. OpenCode: merge MCP-записи aislop -> ~/.config/opencode/opencode.json (остальное не трогает).
+  5. OpenCode: merge MCP-записей aislop + agentdb -> ~/.config/opencode/opencode.json (остальное не трогает).
   6. Самопроверка: hook self-test, наличие файлов, версии. "Вуаля" только если все зеленое.
   Совместим с Windows PowerShell 5.1 и PowerShell 7+ (только двухаргументный Join-Path).
 .EXAMPLE
@@ -82,6 +82,26 @@ if (-not (Test-Path (Join-Two $distSrc "mcp.js"))) { throw "aislop dist not buil
 Copy-Item (Join-Two $distSrc "*") $rtDist -Recurse -Force
 $pkgSrc = Join-Two (Join-Two (Join-Two $RepoRoot "tools") "aislop") "package.json"
 if (Test-Path $pkgSrc) { Copy-Item $pkgSrc (Join-Two (Join-Two $RuntimeDir "tools") "aislop") -Force }
+$agentDbSrc = Join-Two (Join-Two $RepoRoot "tools") "agentdb"
+$rtAgentDb = Join-Two (Join-Two $RuntimeDir "tools") "agentdb"
+if (Test-Path (Join-Two $agentDbSrc "server.py")) {
+  if (-not (Test-Path $rtAgentDb)) { New-Item -ItemType Directory -Path $rtAgentDb -Force | Out-Null }
+  foreach ($name in @("server.py", "requirements.txt", "mcp.json")) {
+    $src = Join-Two $agentDbSrc $name
+    if (Test-Path $src) { Copy-Item $src (Join-Two $rtAgentDb $name) -Force }
+  }
+  if (Test-Cmd "python") {
+    & python -c "import fastmcp" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      & python -m pip install -r (Join-Two $rtAgentDb "requirements.txt") 2>$null
+      if ($LASTEXITCODE -ne 0) { $issues += "fastmcp не установлен: MCP agentdb не запустится. Выполните: python -m pip install -r $rtAgentDb/requirements.txt" }
+    }
+  } else {
+    $issues += "Команда 'python' не найдена: MCP agentdb не запустится."
+  }
+} else {
+  Write-Warning "AgentDB server missing in bundle, MCP agentdb skipped: $agentDbSrc"
+}
 # Init templates: init-workspace.* resolves them from $BaseDir (== runtime root),
 # so the runtime needs rules/ and workspaces/ too, not just scripts/.
 foreach ($td in @("rules", "workspaces")) {
@@ -96,6 +116,7 @@ foreach ($td in @("rules", "workspaces")) {
 }
 $hookScript = Join-Two $rtScripts "hook-pre-invocation.py"
 $mcpJs = Join-Two $rtDist "mcp.js"
+$agentDbServer = Join-Two $rtAgentDb "server.py"
 Write-Host "Runtime OK."
 
 # --- 2. Antigravity hook (user scope, merge) ---
@@ -153,8 +174,8 @@ Get-ChildItem (Join-Two $RepoRoot "skills") -Directory | Where-Object {
 }
 Write-Host ("Skills -> {0} + {1} : {2}" -f $ocSkills, $geminiSkills, ($deployedSkills -join ", "))
 
-# --- 5. OpenCode MCP merge (только запись aislop, остальное не трогаем) ---
-Write-Host "== [5/6] OpenCode MCP (aislop) =="
+# --- 5. OpenCode MCP merge (записи aislop + agentdb, остальное не трогаем) ---
+Write-Host "== [5/6] OpenCode MCP (aislop+agentdb) =="
 $ocDir = Join-Two (Join-Two $BaseHome ".config") "opencode"
 $ocJson = Join-Two $ocDir "opencode.json"
 if (-not (Test-Path $ocDir)) { New-Item -ItemType Directory -Path $ocDir -Force | Out-Null }
@@ -173,15 +194,25 @@ $aislopEntry = [pscustomobject]@{
   timeout = 30000
 }
 $oc.mcp | Add-Member -NotePropertyName "aislop" -NotePropertyValue $aislopEntry -Force
+if (Test-Path $agentDbServer) {
+  $agentdbEntry = [pscustomobject]@{
+    type    = "local"
+    command = @("python", $agentDbServer)
+    enabled = $true
+    timeout = 30000
+  }
+  $oc.mcp | Add-Member -NotePropertyName "agentdb" -NotePropertyValue $agentdbEntry -Force
+  Write-Host "MCP agentdb -> $ocJson"
+}
 $oc | ConvertTo-Json -Depth 10 | Set-Content $ocJson -Encoding UTF8
 Write-Host "MCP aislop -> $ocJson"
-Write-Host "Примечание: MCP agentdb и codebase-memory-mcp внешние (ставятся отдельно), бандл их не разворачивает."
+Write-Host "Примечание: MCP codebase-memory-mcp внешний (ставится отдельно), бандл его не разворачивает."
 
 # --- 6. Verify ---
 if (-not $SkipVerify) {
   Write-Host "== [6/6] Verify =="
   $coreFail = @()
-  foreach ($f in @($hookScript, $mcpJs)) {
+  foreach ($f in @($hookScript, $mcpJs, $agentDbServer)) {
     if (-not (Test-Path $f)) { $coreFail += "Отсутствует рантайм-файл: $f" }
   }
   if (Test-Cmd "python") {

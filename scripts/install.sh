@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Установщик бандла agent-templates (клонируй репо -> запусти этот скрипт -> вуаля).
 # Тот же план, что и scripts/install.ps1: prerequisites, стабильный рантайм
-# ~/.agent-templates, хук Antigravity, плагины и скиллы OpenCode, merge MCP aislop,
+# ~/.agent-templates, хук Antigravity, плагины и скиллы OpenCode, merge MCP aislop+agentdb,
 # самопроверка. Без set -e: шаги предупреждают, а не роняют установку.
 #
 #   git clone <repo-url> agent-bundle
@@ -61,6 +61,17 @@ done
 [ -f "$REPO_ROOT/tools/aislop/dist/mcp.js" ] || { echo "ОШИБКА: aislop dist не собран в бандле (соберите tools/aislop)." >&2; exit 1; }
 cp -rf "$REPO_ROOT/tools/aislop/dist/." "$RUNTIME_DIR/tools/aislop/dist/"
 [ -f "$REPO_ROOT/tools/aislop/package.json" ] && cp -f "$REPO_ROOT/tools/aislop/package.json" "$RUNTIME_DIR/tools/aislop/"
+if [ -f "$REPO_ROOT/tools/agentdb/server.py" ]; then
+  mkdir -p "$RUNTIME_DIR/tools/agentdb"
+  for f in server.py requirements.txt mcp.json; do
+    [ -f "$REPO_ROOT/tools/agentdb/$f" ] && cp -f "$REPO_ROOT/tools/agentdb/$f" "$RUNTIME_DIR/tools/agentdb/$f"
+  done
+  if [ -n "$PY" ]; then
+    "$PY" -c "import fastmcp" 2>/dev/null || "$PY" -m pip install -r "$RUNTIME_DIR/tools/agentdb/requirements.txt" 2>/dev/null || warn "fastmcp не установлен: MCP agentdb не запустится (pip install -r $RUNTIME_DIR/tools/agentdb/requirements.txt)."
+  fi
+else
+  echo "WARNING: AgentDB server missing in bundle, MCP agentdb skipped: $REPO_ROOT/tools/agentdb" >&2
+fi
 # Init templates: init-workspace.* resolves them from BASE_DIR (== runtime root),
 # so the runtime needs rules/ and workspaces/ too, not just scripts/.
 for d in rules workspaces; do
@@ -73,6 +84,7 @@ for d in rules workspaces; do
 done
 HOOK_SCRIPT="$RUNTIME_DIR/scripts/hook-pre-invocation.py"
 MCP_JS="$RUNTIME_DIR/tools/aislop/dist/mcp.js"
+AGENTDB_SERVER="$RUNTIME_DIR/tools/agentdb/server.py"
 echo "Runtime OK."
 
 # Дальше нужен python для JSON-merge; без него merge пропускаем с предупреждением.
@@ -130,12 +142,12 @@ done
 echo "Skills -> opencode + gemini : ${DEPLOYED_SKILLS[*]}"
 
 if [ -n "$PY" ]; then
-echo "== [5/6] OpenCode MCP (aislop) =="
+echo "== [5/6] OpenCode MCP (aislop+agentdb) =="
 mkdir -p "$HOME/.config/opencode"
 OC_JSON="$HOME/.config/opencode/opencode.json"
-"$PY" - "$OC_JSON" "$MCP_JS" <<'EOF'
-import json, sys
-oc_file, mcp_js = sys.argv[1], sys.argv[2]
+"$PY" - "$OC_JSON" "$MCP_JS" "$AGENTDB_SERVER" <<'EOF'
+import json, os, sys
+oc_file, mcp_js, agentdb_server = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(oc_file, encoding="utf-8") as f:
         oc = json.load(f)
@@ -147,11 +159,19 @@ oc.setdefault("mcp", {})["aislop"] = {
     "enabled": True,
     "timeout": 30000,
 }
+if os.path.isfile(agentdb_server):
+    oc["mcp"]["agentdb"] = {
+        "type": "local",
+        "command": ["python", agentdb_server],
+        "enabled": True,
+        "timeout": 30000,
+    }
+    print("MCP agentdb -> %s" % oc_file)
 with open(oc_file, "w", encoding="utf-8") as f:
     json.dump(oc, f, ensure_ascii=False, indent=2)
 EOF
 echo "MCP aislop -> $OC_JSON"
-echo "Примечание: MCP agentdb и codebase-memory-mcp внешние (ставятся отдельно), бандл их не разворачивает."
+echo "Примечание: MCP codebase-memory-mcp внешний (ставится отдельно), бандл его не разворачивает."
 fi
 
 if [ "$SKIP_VERIFY" -eq 0 ]; then
@@ -159,6 +179,7 @@ echo "== [6/6] Verify =="
 CORE_FAIL=()
 [ -f "$HOOK_SCRIPT" ] || CORE_FAIL+=("Отсутствует рантайм-файл: $HOOK_SCRIPT")
 [ -f "$MCP_JS" ] || CORE_FAIL+=("Отсутствует рантайм-файл: $MCP_JS")
+[ -f "$AGENTDB_SERVER" ] || CORE_FAIL+=("Отсутствует рантайм-файл: $AGENTDB_SERVER")
 if [ -n "$PY" ]; then
   OUT="$(echo '{}' | "$PY" "$HOOK_SCRIPT" 2>/dev/null)"
   RC=$?

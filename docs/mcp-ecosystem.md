@@ -29,9 +29,9 @@ flowchart TD
 
 ## Graceful degradation (бандл)
 
-`agentdb` (память) и `codebase-memory-mcp` (граф кода) — **внешние** серверы, в бандл не входят и установщик их не ставит. `aislop` — наоборот **завендорен** (`tools/aislop/dist/`).
+`agentdb` (память) — **завендорен** (`tools/agentdb/server.py`): установщик копирует его в рантайм (`~/.agent-templates/tools/agentdb/`), ставит `fastmcp` и регистрирует MCP-запись `agentdb` в `opencode.json`. БД по умолчанию — `~/.agent-templates/agentdb/memory.db` (переопределяется через `--db`, `$AGENTDB_PATH` / `$OPENCODE_AGENTDB_PATH`; существующая legacy-БД pathfinder переиспользуется автоматически). `codebase-memory-mcp` (граф кода) остаётся **внешним** сервером, в бандл не входит. `aislop` — завендорен (`tools/aislop/dist/`).
 
-- Если инструментов `agentdb_agentdb_*` нет в списке — работай без долгосрочной памяти, не выдумывай её наличие, в конце сессии предложи подключить сервер.
+- Если инструментов `agentdb_agentdb_*` нет в списке — работай без долгосрочной памяти, не выдумывай её наличие, в конце сессии предложи переустановить бандл (`scripts/install.ps1` / `scripts/install.sh`) — он разворачивает сервер agentdb.
 - Если нет `codebase-memory-mcp_search_graph`/`codebase-memory-mcp_trace_path` — падай назад на текстовый поиск (grep/glob), это штатный слой 3.
 - Если нет `aislop_aislop_scan` — используй вендорный CLI: `node ~/.agent-templates/tools/aislop/dist/cli.js scan`.
 

@@ -1,0 +1,1 @@
+{"mcpServers": {"agentdb": {"args": ["%RUNTIME%/tools/agentdb/server.py"], "command": "python"}}}

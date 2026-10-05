@@ -12,6 +12,7 @@
 | `src/config/` | Конфигурация приложения и окружения | `src/config/` (валидация env, константы) |
 | `tests/` | Модульные и интеграционные тесты | `tests/unit/`, `tests/integration/` |
 | `scripts/` | Автоматизация, миграции и сиды | `scripts/` |
+| `tools/agentdb/` | Вендорный MCP-сервер долгосрочной памяти (5 тулов: search/store/status/list/get) | `tools/agentdb/server.py`, `tools/agentdb/requirements.txt`, `tools/agentdb/mcp.json` |
 
 ## Ключевые интерфейсы и типы
 <!-- Фиксируйте главные доменные модели и контракты здесь для быстрого поиска без чтения исходников -->
