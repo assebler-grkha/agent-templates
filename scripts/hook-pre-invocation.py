@@ -25,9 +25,33 @@ def is_ignored_dir(path: str) -> bool:
     drive, rest = os.path.splitdrive(norm)
     if not rest or rest in ("\\", "/"):
         return True
-    # User profile home directory check
-    home = os.path.normpath(os.environ.get("USERPROFILE", "")).lower().rstrip("\\/")
-    if home and norm == home:
+    # Home directory on any platform: USERPROFILE on Windows, HOME/~
+    # elsewhere. Initializing $HOME would scatter AGENTS.md, docs/,
+    # scratch/ and git into the user home directory.
+    _sep = chr(92) + "/"
+    homes = {
+        os.path.normpath(h).lower().rstrip(_sep)
+        for h in (
+            os.environ.get("USERPROFILE", ""),
+            os.environ.get("HOME", ""),
+            os.path.expanduser("~"),
+        )
+        if h and h != "~"
+    }
+    if norm in homes:
+        return True
+    # Bundle runtime dir (~/.agent-templates): installer working copy,
+    # never a project.
+    runtime = (
+        os.path.normpath(os.path.join(os.path.expanduser("~"), ".agent-templates"))
+        .lower()
+        .rstrip(_sep)
+    )
+    if (
+        norm == runtime
+        or norm.startswith(runtime + chr(92))
+        or norm.startswith(runtime + "/")
+    ):
         return True
     return False
 
@@ -180,6 +204,7 @@ def main():
     backoff_mark(target_dir)
     selected = select_init_command(script_dir, target_dir, project_name)
     if selected[0] is None:
+        backoff_clear(target_dir)
         notice = f"[Auto-Init Notice] Обнаружен чистый проект '{project_name}'. Скрипт инициализации не найден: {selected[1]}"
         sys.stdout.write(json.dumps({"injectSteps": [{"ephemeralMessage": notice}]}))
         return

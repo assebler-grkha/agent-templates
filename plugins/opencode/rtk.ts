@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 
 // RTK OpenCode plugin — rewrites commands to use rtk for token savings.
 // Requires: rtk >= 0.23.0 in PATH.
@@ -37,3 +37,8 @@ export const RtkOpenCodePlugin: Plugin = async ({ $ }) => {
     },
   }
 }
+
+// v1 module form: `id` is shown in the OpenCode UI instead of the file path.
+const RtkModule = { id: "rtk", server: RtkOpenCodePlugin } satisfies PluginModule
+
+export default RtkModule

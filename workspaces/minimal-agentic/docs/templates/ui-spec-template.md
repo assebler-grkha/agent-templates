@@ -3,7 +3,7 @@
 - **Status**: Draft | Active | Implemented | Deprecated
 - **Route**: `{{ROUTE_PATH}}`
 - **Role Access**: Public | Student | Teacher | Admin
-- **Penpot Boards**:
+- **Penpot Boards** (только если дизайн ведётся в Penpot, иначе раздел пропустить):
   - Light Theme: ID `{{LIGHT_BOARD_ID}}` (x: 0, y: {{Y_OFFSET}}, 1440x1080)
   - Dark Theme: ID `{{DARK_BOARD_ID}}` (x: 1540, y: {{Y_OFFSET}}, 1440x1080)
 

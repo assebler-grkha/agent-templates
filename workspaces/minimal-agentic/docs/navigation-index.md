@@ -19,5 +19,5 @@
 - `DatabaseClient`: Подключение к базе данных и управление транзакциями.
 
 ## Рекомендации для агентов
-1. Для детального исследования используйте `codebase-memory-mcp` (`search_graph`, `trace_path`).
+1. Для детального исследования используйте `codebase-memory-mcp` (`codebase-memory-mcp_search_graph`, `codebase-memory-mcp_trace_path`).
 2. При добавлении новых крупных подсистем вносите их в таблицу выше.

@@ -82,20 +82,20 @@
 1. Описание назначения проекта (1 абзац).
 2. Стек технологий (краткая таблица: Frontend, Backend, Database, Tools).
 3. Быстрый старт (строго 3 шага: клонирование/установка, настройка `.env`, запуск dev-сервера).
-4. Карта ключевых команд (`npm run dev`, `npm test`, `npx aislop scan`).
+4. Карта ключевых команд (`npm run dev`, `npm test`, `aislop_aislop_scan`).
 
 ---
 
 ## 4. Протокол индексации и поддержания актуальности
 
 1. **Регистрация в индексах**:
-   - Каждая новая UI или API спека регистрируется в [`docs/navigation-index.md`](file:///C:/Agent%20templates/workspaces/minimal-agentic/docs/navigation-index.md) в таблице модулей.
-   - Каждое архитектурное решение (ADR) регистрируется в [`docs/notes-index.md`](file:///C:/Agent%20templates/workspaces/minimal-agentic/docs/notes-index.md).
+   - Каждая новая UI или API спека регистрируется в [`docs/navigation-index.md`](docs/navigation-index.md) в таблице модулей.
+   - Каждое архитектурное решение (ADR) регистрируется в [`docs/notes-index.md`](docs/notes-index.md).
 2. **Жизненный цикл планов (Архивация)**:
    - Когда все задачи в файле `docs/plans/{phase}_plan.md` выполнены (`[x] 100%`), агент:
      1. Меняет статус на `Status: Completed`.
      2. Перемещает файл в папку `docs/archive/{phase}_plan.md`.
-     3. Фиксирует ключевой результат в `AgentDB` (`agentdb_store`).
+      3. Фиксирует ключевой результат в `AgentDB` (`agentdb_agentdb_store`).
      4. Обновляет строку `Current Focus` в `AGENTS.md` на следующую активную цель.
 3. **Защита от устаревания (Staleness Audit)**:
    - Скрипт `scripts/audit-context.ps1` проверяет ссылки из индексов: если файл удален или переименован, выдается предупреждение.

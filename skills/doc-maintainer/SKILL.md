@@ -22,8 +22,8 @@ description: Управление проектной документацией,
 - **План фазы**: создается в `docs/plans/{phase}_plan.md`. В папке `docs/plans/` не должно быть более 2 активных планов!
 
 ### 2. Обязательная регистрация в индексах
-- Каждая новая спека немедленно регистрируется в строке таблицы [`docs/navigation-index.md`](file:///C:/Agent%20templates/workspaces/minimal-agentic/docs/navigation-index.md).
-- Каждое решение (ADR) регистрируется ссылкой в [`docs/notes-index.md`](file:///C:/Agent%20templates/workspaces/minimal-agentic/docs/notes-index.md).
+- Каждая новая спека немедленно регистрируется в строке таблицы `docs/navigation-index.md`.
+- Каждое решение (ADR) регистрируется ссылкой в `docs/notes-index.md`.
 - **В `AGENTS.md` ничего не дописывается** — он сохраняет бюджет <= 3.5 КБ!
 
 ### 3. Синхронизация `.env.example`
@@ -36,7 +36,7 @@ description: Управление проектной документацией,
 - Когда все пункты в `docs/plans/{phase}_plan.md` отмечены `[x]`:
   1. Изменить статус в шапке на `Status: Completed`.
   2. Переместить файл в `docs/archive/{phase}_plan.md`.
-  3. Сохранить краткий итог вехи в `AgentDB` (`agentdb_store(key="{project}_{phase}_completed", project="{project_name}")`).
+   3. Сохранить краткий итог вехи в `AgentDB` (`agentdb_agentdb_store(doc_id="{project}_{phase}_completed", domain="{project_name}", content="...")`).
   4. Обновить поле `Current Focus` в `AGENTS.md` на следующую задачу.
 
 ### 5. Использование `scratch/`

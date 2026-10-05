@@ -61,6 +61,16 @@ done
 [ -f "$REPO_ROOT/tools/aislop/dist/mcp.js" ] || { echo "ОШИБКА: aislop dist не собран в бандле (соберите tools/aislop)." >&2; exit 1; }
 cp -rf "$REPO_ROOT/tools/aislop/dist/." "$RUNTIME_DIR/tools/aislop/dist/"
 [ -f "$REPO_ROOT/tools/aislop/package.json" ] && cp -f "$REPO_ROOT/tools/aislop/package.json" "$RUNTIME_DIR/tools/aislop/"
+# Init templates: init-workspace.* resolves them from BASE_DIR (== runtime root),
+# so the runtime needs rules/ and workspaces/ too, not just scripts/.
+for d in rules workspaces; do
+  if [ -d "$REPO_ROOT/$d" ]; then
+    rm -rf "$RUNTIME_DIR/$d"
+    cp -r "$REPO_ROOT/$d" "$RUNTIME_DIR/$d"
+  else
+    echo "WARNING: template dir missing in bundle, init will fail loudly: $REPO_ROOT/$d" >&2
+  fi
+done
 HOOK_SCRIPT="$RUNTIME_DIR/scripts/hook-pre-invocation.py"
 MCP_JS="$RUNTIME_DIR/tools/aislop/dist/mcp.js"
 echo "Runtime OK."

@@ -15,12 +15,12 @@ description: Быстрая подготовка нового или сущес�
 1. **Анализ стека проекта**:
    - Определение основного языка/фреймворка (Node, Python, Go, Rust) по корневым манифестам.
 2. **Развертывание структуры и правил**:
-   - Запуск `scripts/init-workspace.ps1` (создание `docs/`, `scratch/`, `.gitignore`, `.dockerignore`, `.env.example`, `README.md`, `AGENTS.md`).
+    - Запуск init-скрипта по платформе: `scripts/init-workspace.ps1` (Windows) или `scripts/init-workspace.sh` (Linux/macOS) — создание `docs/`, `scratch/`, `.gitignore`, `.dockerignore`, `.env.example`, `README.md`, `AGENTS.md`.
 3. **Обязательная инициализация Git и привязка Remote**:
    - Проверка наличия Git (`git status`). При отсутствии — `git init -b main`, добавление структуры и первый коммит.
    - **Запрос у пользователя**: Спросить URL удаленного репозитория: *"Укажите URL remote репозитория (GitHub/GitLab) для подключения origin:"*.
-   - Выполнить `git remote add origin <url>` и `git push -u origin main`.
-4. **Регистрация в AgentDB**:
-   - Регистрация домена проекта `{project_name}_init_meta` в `agentdb` через `agentdb_store`.
+    - Выполнить `git remote add origin <url>` и — только после получения URL — `git push -u origin main`. Без URL от пользователя push пропустить.
+4. **Регистрация в AgentDB** (только если init-скрипт пропустил её — нет python в PATH):
+     - Регистрация домена проекта в `agentdb` через `agentdb_agentdb_store(doc_id="{project_name}_init_meta", domain="{project_name}", content="...")`.
 5. **Финальный аудит**:
    - Запуск `scripts/audit-context.ps1` для подтверждения отсутствия ошибок и соблюдения лимитов.

@@ -76,14 +76,14 @@ Constraints: {Критические нерушимые требования р�
 2. **Ротация Gotchas (FIFO)**:
    - Максимум 5 записей.
    - При добавлении 6-й записи самая старая или неактуальная запись переносится в `AgentDB`:
-     ```python
-     agentdb_store(
-         key="{project}_gotcha_{topic}",
-         project="{project_name}",
-         category="archived_gotchas",
-         content="..."
-     )
-     ```
+      ```text
+      agentdb_agentdb_store(
+          doc_id="{project}_gotcha_{topic}",
+          domain="{project_name}",
+          content="...",
+          metadata='{"category": "archived_gotchas"}'
+      )
+      ```
    - Запись удаляется из `AGENTS.md`.
 3. **Разгрузка навигации в документы-индексы**:
    - Если проект разрастается (микросервисы, десятки модулей), агент не раздувает блок навигации в `AGENTS.md`, а выносит детальные карты в `docs/navigation-index.md`.

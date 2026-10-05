@@ -80,7 +80,7 @@ const TODO_TRACKING_RE =
 
 ```markdown
 ## Code Quality & Technical Debt Tracking
-- Clean Code Gate: 'npx aislop scan' before commits (target: 100/100 Healthy).
+- Clean Code Gate: 'aislop_aislop_scan' before commits (target: 100/100 Healthy).
 - Debt Tagging: Mark temporary stubs, mocks, and hardcoded values with 'AGENT:STUB', 'AGENT:MOCK', or 'AGENT:HARDCODE'. Unmarked stubs will fail the quality gate.
 ```
 

@@ -42,6 +42,134 @@ if (-not $ProjectName) {
 
 $Today = (Get-Date).ToString("yyyy-MM-dd")
 
+# Детект стека по маркерам: явный -ProjectStack побеждает, иначе маркеры
+# файлов, иначе честное TBD (README-шаблон не должен врать на пустой папке).
+$StackExplicit = $PSBoundParameters.ContainsKey('ProjectStack')
+$DetectedLang = ''
+$DetectedMarker = ''
+foreach ($m in @(@('package.json', 'Node.js'), @('pyproject.toml', 'Python'), @('requirements.txt', 'Python'), @('setup.py', 'Python'), @('go.mod', 'Go'), @('Cargo.toml', 'Rust'))) {
+    if (Test-Path (Join-Path $ResolvedTarget $m[0])) { $DetectedLang = $m[1]; $DetectedMarker = $m[0]; break }
+}
+function Get-StackFamily([string]$s) {
+    if ($s -match 'Node|TypeScript|JavaScript') { return 'Node.js' }
+    if ($s -match 'Python') { return 'Python' }
+    if ($s -match '(^|[^A-Za-z])Go([^A-Za-z]|$)') { return 'Go' }
+    if ($s -match 'Rust') { return 'Rust' }
+    return ''
+}
+$StackFamily = if ($StackExplicit) { Get-StackFamily $ProjectStack } else { $DetectedLang }
+$ReadmeLang = 'TBD'
+$ReadmeFramework = 'TBD'
+$ReadmeDb = 'TBD'
+$ReadmeDescription = 'Каркас рабочей директории кодинг-агента. Стек не определён — заполни разделы TODO ниже.'
+if ($StackExplicit -and $ProjectStack) { $ReadmeFramework = $ProjectStack }
+if ($DetectedLang) {
+    $ReadmeLang = "$DetectedLang (маркер: $DetectedMarker)"
+    if (-not $StackExplicit) { $ReadmeFramework = $DetectedLang }
+    $ReadmeDescription = 'Рабочий проект с архитектурными стандартами и поддержкой ИИ-агентов.'
+}
+
+# Инжектируемые блоки README: вариант под стек либо TODO-чеклист.
+$QsTodo = @'
+> TODO: выбери стек проекта и заполни этот раздел.
+>
+> - [ ] Определить язык/рантайм и фреймворк, обновить таблицу стека выше
+> - [ ] Записать команды установки зависимостей
+> - [ ] Записать команды запуска, сборки и тестов
+> - [ ] Удалить этот чеклист
+'@
+$CmdTodo = @'
+> TODO: команды появятся после выбора стека (см. чеклист выше).
+'@
+$QsNode = @'
+1. Скопируй `.env.example` в `.env` и заполни секреты:
+   ```bash
+   cp .env.example .env
+   ```
+2. Установи зависимости и прогони тесты:
+   ```bash
+   npm install        # или pnpm install
+   npm test
+   ```
+3. Запусти проект:
+   ```bash
+   npm run dev        # порт — см. конфиг проекта
+   ```
+'@
+$CmdNode = @'
+```bash
+npm run build      # сборка
+npm test           # тесты
+npm run lint       # линтер (если настроен)
+```
+'@
+$QsPython = @'
+1. Скопируй `.env.example` в `.env` и заполни секреты:
+   ```bash
+   cp .env.example .env
+   ```
+2. Создай окружение, установи зависимости и прогони тесты:
+   ```bash
+   python -m venv .venv && .\.venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   python -m pytest
+   ```
+3. Запусти проект:
+   ```bash
+   python main.py       # точка входа — уточни под проект
+   ```
+'@
+$CmdPython = @'
+```bash
+pip install -r requirements.txt  # зависимости
+python -m pytest                 # тесты
+```
+'@
+$QsGo = @'
+1. Скопируй `.env.example` в `.env` и заполни секреты:
+   ```bash
+   cp .env.example .env
+   ```
+2. Собери и прогони тесты:
+   ```bash
+   go mod download
+   go build ./...
+   go test ./...
+   ```
+'@
+$CmdGo = @'
+```bash
+go build ./...     # сборка
+go test ./...      # тесты
+```
+'@
+$QsRust = @'
+1. Скопируй `.env.example` в `.env` и заполни секреты:
+   ```bash
+   cp .env.example .env
+   ```
+2. Собери и прогони тесты:
+   ```bash
+   cargo build
+   cargo test
+   ```
+'@
+$CmdRust = @'
+```bash
+cargo build        # сборка
+cargo test         # тесты
+```
+'@
+$QsBlock = $QsTodo; $CmdBlock = $CmdTodo
+$TestCmd = 'TBD (стек не определён — впиши команду запуска тестов)'
+$Quality = 'TBD (зафиксируй линтеры проекта)'
+switch ($StackFamily) {
+    'Node.js' { $QsBlock = $QsNode; $CmdBlock = $CmdNode; $TestCmd = 'npm test'; $Quality = 'ESLint / Prettier' }
+    'Python' { $QsBlock = $QsPython; $CmdBlock = $CmdPython; $TestCmd = 'python -m pytest'; $Quality = 'Ruff' }
+    'Go' { $QsBlock = $QsGo; $CmdBlock = $CmdGo; $TestCmd = 'go test ./...'; $Quality = 'gofmt / golangci-lint' }
+    'Rust' { $QsBlock = $QsRust; $CmdBlock = $CmdRust; $TestCmd = 'cargo test'; $Quality = 'rustfmt / clippy' }
+}
+
 function Join-Parts {
     # Windows PowerShell 5.1 принимает у Join-Path только 2 позиционных аргумента
     # (multi-child появился в PS 6+): сворачиваем цепочку вручную. Работает везде.
@@ -54,7 +182,7 @@ function Join-Parts {
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " Инициализация рабочего пространства для ИИ-агентов        " -ForegroundColor Cyan
-Write-Host " Проект: $ProjectName | Стек: $ProjectStack"
+ Write-Host " Проект: $ProjectName | Стек: $ReadmeFramework"
 Write-Host " Целевой путь: $($ResolvedTarget.Path)"
 Write-Host "==========================================================" -ForegroundColor Cyan
 
@@ -130,6 +258,7 @@ if ($UseDynamic) {
         $rendered = $templateContent.Replace("{{PROJECT_NAME}}", $ProjectName)
         $rendered = $rendered.Replace("{{PROJECT_STACK}}", $ProjectStack)
         $rendered = $rendered.Replace("{{INIT_DATE}}", $Today)
+        $rendered = $rendered.Replace("{{TESTCMD}}", $TestCmd)
         
         [System.IO.File]::WriteAllText($TargetRuleFile, $rendered, [System.Text.Encoding]::UTF8)
         Write-Host "  [+] Сгенерирован динамический файл правил: $RuleFileName (< 3.5 КБ)" -ForegroundColor Green
@@ -140,6 +269,10 @@ if ($UseDynamic) {
         Copy-Item -Path $SourceRuleTemplate -Destination $TargetRuleFile -Force
         Write-Host "  [+] Развернут файл правил: $RuleFileName" -ForegroundColor Green
     }
+}
+if (-not (Test-Path $TargetRuleFile)) {
+    Write-Error "Rule template not found and no rule file generated (look for rules/*.template.md under $BaseDir). Refusing silent partial init."
+    exit 1
 }
 
 # 4. Файловая гигиена: .gitignore, .dockerignore, .env.example, README.md
@@ -164,10 +297,13 @@ if (-not (Test-Path $TargetReadme)) {
     if (Test-Path $ReadmeTemplate) {
         $readmeContent = Get-Content -Path $ReadmeTemplate -Raw -Encoding UTF8
         $readmeRendered = $readmeContent.Replace("{{PROJECT_NAME}}", $ProjectName)
-        $readmeRendered = $readmeRendered.Replace("{{PROJECT_DESCRIPTION}}", "Рабочий проект с архитектурными стандартами и поддержкой ИИ-агентов.")
-        $readmeRendered = $readmeRendered.Replace("{{LANG_RUNTIME}}", "Node.js 22+ / Python 3.11+")
-        $readmeRendered = $readmeRendered.Replace("{{FRAMEWORK}}", $ProjectStack)
-        $readmeRendered = $readmeRendered.Replace("{{DATABASE_ORM}}", "PostgreSQL / SQLite")
+        $readmeRendered = $readmeRendered.Replace("{{PROJECT_DESCRIPTION}}", $ReadmeDescription)
+        $readmeRendered = $readmeRendered.Replace("{{LANG_RUNTIME}}", $ReadmeLang)
+        $readmeRendered = $readmeRendered.Replace("{{FRAMEWORK}}", $ReadmeFramework)
+        $readmeRendered = $readmeRendered.Replace("{{DATABASE_ORM}}", $ReadmeDb)
+        $readmeRendered = $readmeRendered.Replace("{{QUALITY}}", $Quality)
+        $readmeRendered = $readmeRendered.Replace("{{QUICKSTART}}", $QsBlock)
+        $readmeRendered = $readmeRendered.Replace("{{COMMANDS}}", $CmdBlock)
         [System.IO.File]::WriteAllText($TargetReadme, $readmeRendered, [System.Text.Encoding]::UTF8)
         Write-Host "  [+] Создан витринный README.md" -ForegroundColor Green
     }
@@ -229,6 +365,17 @@ if (-not (Test-Path $GitDir)) {
     }
     $ErrorActionPreference = $prevEAP
 } else {
+    # Чужой bare `git init` (ветка master, ноль коммитов): нормализуем в main,
+    # пока истории нет — переименовывать нечего и ломать нечего.
+    # rev-parse падает без коммитов — гасим terminating-ошибку ($ErrorActionPreference = "Stop").
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    git -C "$targetPathStr" rev-parse --verify HEAD 2>&1 | Out-Null
+    $needRename = ($LASTEXITCODE -ne 0)
+    $ErrorActionPreference = $prevEAP
+    if ($needRename) {
+        git -C "$targetPathStr" branch -M main 2>&1 | Out-Null
+    }
     git -C "$targetPathStr" add . | Out-Null
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "SilentlyContinue"

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>arch-tree — Проверка вариантов (Nobel)</title>
+<link rel="stylesheet" href="https://unpkg.com/reactflow@11.11.3/dist/style.css" />
+<style>
+  html,body,#root{height:100%;margin:0;font-family:system-ui,sans-serif}
+  #layout{display:flex;height:100%}
+  #flow{flex:1}
+  #panel{width:340px;border-left:1px solid #ddd;padding:12px;overflow:auto}
+  .row{margin-bottom:8px} input,select,textarea{width:100%;box-sizing:border-box}
+  button{margin:2px 4px 2px 0}
+  .bind{border:1px solid #eee;padding:6px;margin:6px 0;font-size:12px}
+  .type{font-size:11px;color:#555}
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/reactflow@11.11.3/dist/umd/index.js"></script>
+</head>
+<body>
+<div id="layout"><div id="flow"></div>
+<div id="panel">
+  <h3>arch-tree · Nobel check</h3>
+  <div class="row"><button id="reload">Обновить</button><button id="save">Сохранить всё</button></div>
+  <div class="row"><strong>Нода</strong><div id="nodeForm"></div></div>
+  <div class="row"><strong>Новая связь</strong><br>
+    <input id="edgeId" placeholder="edge id" />
+    <input id="edgeFrom" placeholder="from" />
+    <input id="edgeTo" placeholder="to" />
+    <input id="edgeLabel" placeholder="label" />
+    <button id="addEdge">Добавить связь</button>
+  </div>
+  <div class="row"><strong>Привязка CBM (ручной импорт)</strong><br>
+    <input id="bindKind" placeholder="kind: table|symbol|route|file" />
+    <input id="bindQn" placeholder="qn из codebase-memory" />
+    <input id="bindFile" placeholder="file" />
+    <input id="bindLines" placeholder="lines напр. 180-262" />
+    <input id="bindSnap" placeholder="snapshot" />
+    <button id="addBind">Подтянуть из CBM</button>
+  </div>
+  <div id="info"></div>
+</div></div>
+<script>
+const { useState, useEffect } = React;
+const RF = window.ReactFlow;
+let tree = { nodes: [], edges: [] };
+let selected = null;
+
+async function load() {
+  const r = await fetch('/api/tree');
+  tree = await r.json();
+  render();
+  document.getElementById('info').textContent = 'Нод: ' + tree.nodes.length + ', связей: ' + tree.edges.length;
+}
+async function saveAll() {
+  await fetch('/api/save', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(tree) });
+  document.getElementById('info').textContent = 'Сохранено';
+}
+function render() {
+  const nodes = tree.nodes.map(n => ({
+    id: n.id, position: n.pos || { x: 100, y: 100 },
+    data: { label: n.title + ' [' + n.type + ']' }, selected: selected === n.id
+  }));
+  const edges = tree.edges.map(e => ({ id: e.id, source: e.from, target: e.to, label: e.label }));
+  const root = document.getElementById('flow');
+  root.innerHTML = '<div id="rf" style="width:100%;height:100%"></div>';
+  const rfRoot = ReactDOM.createRoot(document.getElementById('rf'));
+  rfRoot.render(React.createElement(RF.ReactFlow, {
+    nodes, edges, fitView: true,
+    onNodeClick: (_, nd) => { selected = nd.id; render(); renderForm(); }
+  }, React.createElement(RF.Background), React.createElement(RF.Controls)));
+  renderForm();
+}
+function renderForm() {
+  const box = document.getElementById('nodeForm');
+  const n = tree.nodes.find(x => x.id === selected);
+  if (!n) { box.innerHTML = '<span class="type">кликни ноду на схеме; drag — двигать, позиция сохранится</span>'; return; }
+  box.innerHTML = '';
+  const mk = (label, val, key, textarea) => {
+    const w = document.createElement('div'); w.className = 'row';
+    w.innerHTML = '<span class="type">' + label + '</span>';
+    const inp = document.createElement(textarea ? 'textarea' : 'input');
+    inp.value = val || ''; inp.onchange = e => { n[key] = e.target.value; };
+    w.appendChild(inp); box.appendChild(w);
+  };
+  mk('title', n.title, 'title'); mk('notes', n.notes, 'notes', true);
+  const binds = document.createElement('div');
+  binds.innerHTML = '<span class="type">bindings (' + (n.bindings || []).length + ')</span>';
+  (n.bindings || []).forEach(b => {
+    const d = document.createElement('div'); d.className = 'bind';
+    d.textContent = b.kind + ' · ' + b.qn + ' · ' + b.file + ' ' + (b.lines || '') + ' — ' + (b.snapshot || '');
+    binds.appendChild(d);
+  });
+  box.appendChild(binds);
+}
+document.getElementById('reload').onclick = load;
+document.getElementById('save').onclick = saveAll;
+document.getElementById('addEdge').onclick = async () => {
+  const e = { id: edgeId.value, from: edgeFrom.value, to: edgeTo.value, label: edgeLabel.value };
+  await fetch('/api/edges', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(e) });
+  load();
+};
+document.getElementById('addBind').onclick = () => {
+  const n = tree.nodes.find(x => x.id === selected);
+  if (!n) return;
+  n.bindings = n.bindings || [];
+  n.bindings.push({ kind: bindKind.value, qn: bindQn.value, file: bindFile.value, lines: bindLines.value, snapshot: bindSnap.value, imported_at: new Date().toISOString().slice(0,10) });
+  renderForm();
+};
+setInterval(() => {
+  const els = document.querySelectorAll('.react-flow__node');
+  els.forEach(el => {
+    const id = el.getAttribute('data-id');
+    const t = el.getAttribute('transform') || '';
+    const m = t.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    if (m && id) { const n = tree.nodes.find(x => x.id === id); if (n) n.pos = { x: +m[1], y: +m[2] }; }
+  });
+}, 2000);
+load();
+</script>
+</body>
+</html>

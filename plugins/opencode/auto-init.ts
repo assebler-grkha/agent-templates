@@ -1,8 +1,9 @@
-import type { Plugin } from "@opencode-ai/plugin";
+import type { Plugin, PluginModule } from "@opencode-ai/plugin";
 import { existsSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 
 interface InitTarget {
   script: string;
@@ -24,12 +25,20 @@ function resolveInit(): InitTarget | null {
     const candidate = join(dirname(here), "..", "..", "scripts");
     if (existsSync(candidate)) dir = candidate;
   } catch {
-    // ignore, legacy fallback below
+    // ignore, runtime fallback below
   }
-  const ps1 = dir ? join(dir, "init-workspace.ps1") : "C:/Agent templates/scripts/init-workspace.ps1";
-  const sh = dir ? join(dir, "init-workspace.sh") : "";
-  const ps1Exists = existsSync(ps1);
-  const shExists = sh !== "" && existsSync(sh);
+  // 3. Installer runtime copy (~/.agent-templates/scripts/): install.ps1 /
+  // install.sh deploy the scripts there, while the plugin file itself is
+  // deployed to ~/.config/opencode/plugins/ where the ../../scripts layout
+  // above resolves to a nonexistent ~/.config/scripts.
+  if (!dir) {
+    const runtime = join(homedir(), ".agent-templates", "scripts");
+    if (existsSync(runtime)) dir = runtime;
+  }
+  const ps1 = dir ? join(dir, "init-workspace.ps1") : null;
+  const sh = dir ? join(dir, "init-workspace.sh") : null;
+  const ps1Exists = ps1 !== null && existsSync(ps1);
+  const shExists = sh !== null && existsSync(sh);
   // Windows prefers .ps1; POSIX prefers .sh with pwsh+.ps1 fallback
   if (process.platform === "win32") {
     if (ps1Exists) return { script: ps1, shell: "powershell.exe", psStyle: true };
@@ -41,12 +50,28 @@ function resolveInit(): InitTarget | null {
   return null;
 }
 
+function normDir(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+}
+
 function isIgnoredDir(dir: string): boolean {
   if (!dir) return true;
-  const norm = dir.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
-  const home = (process.env.USERPROFILE || "").replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+  const norm = normDir(dir);
+  // Drive/filesystem roots can never be projects.
   if (norm === "" || norm === "/" || /^[a-z]:$/i.test(norm)) return true;
-  if (norm === home) return true;
+  // Home directory on any platform: USERPROFILE on Windows, HOME elsewhere.
+  // Initializing $HOME would scatter AGENTS.md, docs/, scratch/ and git
+  // into the user home directory.
+  const homes = new Set(
+    [process.env.USERPROFILE, process.env.HOME, homedir()]
+      .filter((h): h is string => !!h)
+      .map((h) => normDir(h)),
+  );
+  if (homes.has(norm)) return true;
+  // Bundle runtime dir (~/.agent-templates): installer working copy,
+  // never a project.
+  const runtime = normDir(homedir() + "/.agent-templates");
+  if (norm === runtime || norm.startsWith(runtime + "/")) return true;
   return false;
 }
 
@@ -106,6 +131,8 @@ export const AutoInitPlugin: Plugin = async ({ directory }) => {
   // Кэш проверенных директорий + guard от параллельных запусков
   const checked = new Set<string>();
   const inFlight = new Set<string>();
+  const failedAt = new Map<string, number>();
+  const FAILED_RETRY_MS = 60 * 60 * 1000; // one retry per hour, not per event
 
   function extractSessionDir(event: unknown): string | undefined {
     const p = (event as any)?.properties;
@@ -128,22 +155,27 @@ export const AutoInitPlugin: Plugin = async ({ directory }) => {
     if (!existsSync(agentsPath) && !existsSync(geminiPath) && !existsSync(claudePath)) {
       const projectName = basename(targetDir);
       if (init) {
+        const lastFail = failedAt.get(targetDir) ?? 0;
+        if (Date.now() - lastFail < FAILED_RETRY_MS) return;
         inFlight.add(targetDir);
         try {
           const res = await runInitScript(init, targetDir, projectName);
           if (res.code === 0) {
             console.log(`[auto-init] Project '${projectName}' automatically initialized with AGENTS.md, docs, and AgentDB domain.`);
+            failedAt.delete(targetDir);
+            checked.add(targetDir);
           } else {
             console.warn(`[auto-init] Project '${projectName}' initialization failed with code ${res.code}: ${res.stderr || res.stdout}`);
+            failedAt.set(targetDir, Date.now());
           }
         } catch (err) {
           console.warn(`[auto-init] Error during autonomous workspace init: ${err}`);
+            failedAt.set(targetDir, Date.now());
         } finally {
-          inFlight.delete(targetDir);
-          checked.add(targetDir);
+          inFlight.delete(targetDir); // checked only on success below
         }
       } else {
-        console.warn(`[auto-init] Init script not found for this platform`);
+        console.warn(`[auto-init] Init script not found for this platform (checked repo scripts/ and ~/.agent-templates/scripts; set AGENT_INIT_SCRIPT to override)`);
         checked.add(targetDir);
       }
     } else {
@@ -171,4 +203,8 @@ export const AutoInitPlugin: Plugin = async ({ directory }) => {
   };
 };
 
-export default AutoInitPlugin;
+// v1 module form: `id` is shown in the OpenCode UI instead of the file path.
+// The named export is kept so older hosts can still load the legacy path.
+const AutoInitModule = { id: "auto-init", server: AutoInitPlugin } satisfies PluginModule;
+
+export default AutoInitModule;

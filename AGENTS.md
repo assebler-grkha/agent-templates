@@ -14,7 +14,7 @@ Inherits: global user_rules (3-Tier Search, No Greedy Reads, YAGNI, Aislop)
 - Detailed Symbol & File Map: [docs/navigation-index.md](docs/navigation-index.md)
 - Operational Notes & Decisions: [docs/notes-index.md](docs/notes-index.md)
 - Debt Registry Query: `rg "AGENT:(MOCK|STUB|HARDCODE)"`
-- AgentDB Domain: `Agent templates` (query via agentdb_search with project filter)
+- AgentDB Domain: `Agent templates` (query via agentdb_search with `domain` filter)
 <!-- ZONE: INDEX_POINTERS: END -->
 
 <!-- ZONE: DYNAMIC: NAVIGATION: START -->
@@ -27,7 +27,7 @@ Inherits: global user_rules (3-Tier Search, No Greedy Reads, YAGNI, Aislop)
 
 <!-- ZONE: DYNAMIC: GOTCHAS: START -->
 ## Project Gotchas (Max 5, FIFO Rotation)
-- [2026-09-23] Проект инициализирован. Запуск тестов через 'npm test' / 'pytest'.
+- [2026-09-23] Проект инициализирован. Тесты: `pnpm vitest run` внутри `tools/aislop`; корневого тест-раннера нет.
 <!-- ZONE: DYNAMIC: GOTCHAS: END -->
 
 <!-- ZONE: DYNAMIC: FOCUS: START -->

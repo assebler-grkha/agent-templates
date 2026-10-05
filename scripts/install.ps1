@@ -82,6 +82,18 @@ if (-not (Test-Path (Join-Two $distSrc "mcp.js"))) { throw "aislop dist not buil
 Copy-Item (Join-Two $distSrc "*") $rtDist -Recurse -Force
 $pkgSrc = Join-Two (Join-Two (Join-Two $RepoRoot "tools") "aislop") "package.json"
 if (Test-Path $pkgSrc) { Copy-Item $pkgSrc (Join-Two (Join-Two $RuntimeDir "tools") "aislop") -Force }
+# Init templates: init-workspace.* resolves them from $BaseDir (== runtime root),
+# so the runtime needs rules/ and workspaces/ too, not just scripts/.
+foreach ($td in @("rules", "workspaces")) {
+  $tsrc = Join-Two $RepoRoot $td
+  if (Test-Path $tsrc) {
+    $tdst = Join-Two $RuntimeDir $td
+    if (Test-Path $tdst) { Remove-Item $tdst -Recurse -Force }
+    Copy-Item $tsrc $tdst -Recurse -Force
+  } else {
+    Write-Warning "Template dir missing in bundle, init will fail loudly: $tsrc"
+  }
+}
 $hookScript = Join-Two $rtScripts "hook-pre-invocation.py"
 $mcpJs = Join-Two $rtDist "mcp.js"
 Write-Host "Runtime OK."

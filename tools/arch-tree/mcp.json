@@ -1,0 +1,1 @@
+{"mcpServers": {"arch-tree": {"args": ["C:/Agent templates/tools/arch-tree/server.py", "--data", "C:/Agent templates/tools/arch-tree/data/arch-tree.nobel.check.json", "--port", "8765"], "command": "python"}}}
