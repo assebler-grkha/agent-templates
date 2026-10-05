@@ -80,7 +80,8 @@ agent-templates/
 │   ├── generate-code-map.ps1      # Генерация компактной карты файлов
 │   └── hook-pre-invocation.py     # Pre-invocation хук для динамической сборки контекста
 ├── tools/                         # Встроенные инструменты
-│   └── aislop/                    # Форк @antigravity/aislop (0.16.1-agentic) с MCP сервером
+│   ├── aislop/                    # Форк @antigravity/aislop (0.16.1-agentic) с MCP сервером
+│   └── agentdb/                   # Вендорный MCP-сервер долгосрочной памяти (server.py + requirements + mcp.json)
 └── docs/                          # Методические материалы и спецификации
     ├── project-structure-canon.md # Канон структуры папок и гигиены
     ├── dynamic-rules-spec.md      # Спецификация динамических правил
@@ -91,10 +92,64 @@ agent-templates/
 
 ---
 
+## 🧠 Установка и настройка AgentDB (долгосрочная память)
+
+Репозиторий включает вендорный MCP-сервер долгосрочной памяти ([`tools/agentdb`](tools/agentdb)): SQLite FTS5 + JSON1, 5 тулов (`search` / `store` / `status` / `list` / `get`), схема БД инициализируется автоматически при первом запуске.
+
+### Вариант А — автоматически (рекомендуется)
+Установщик всё делает сам (§0 выше): копирует сервер в рантайм `~/.agent-templates/tools/agentdb/`, ставит `fastmcp` и регистрирует MCP-запись `agentdb` в `~/.config/opencode/opencode.json`. Ничего дополнительно настраивать не нужно.
+
+### Вариант Б — вручную
+1. Зависимость: `pip install "fastmcp>=2"` (или `pip install -r tools/agentdb/requirements.txt`).
+2. Для OpenCode (`~/.config/opencode/opencode.json`):
+```json
+{
+  "mcp": {
+    "agentdb": {
+      "type": "local",
+      "command": [
+        "python",
+        "C:/Users/<you>/.agent-templates/tools/agentdb/server.py"
+      ],
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}
+```
+3. Для Google Antigravity (`~/.gemini/config/mcp_config.json`):
+```json
+{
+  "mcpServers": {
+    "agentdb": {
+      "command": "python",
+      "args": [
+        "C:/Users/<you>/.agent-templates/tools/agentdb/server.py"
+      ]
+    }
+  }
+}
+```
+Шаблон записи лежит в [`tools/agentdb/mcp.json`](tools/agentdb/mcp.json) (плейсхолдер `%RUNTIME%` = `~/.agent-templates`).
+
+### Где хранится память
+Порядок резолва пути к БД: флаг `--db <path>` → `$AGENTDB_PATH` → `$OPENCODE_AGENTDB_PATH` → существующая legacy-БД pathfinder (переиспользуется автоматически, накопленное не теряется) → `~/.agent-templates/agentdb/memory.db` (создаётся при первом обращении).
+
+Проверить работу: `python ~/.agent-templates/tools/agentdb/server.py --help`, затем в агенте — тул `agentdb_status` должен вернуть `documentCount` и путь к БД.
+
+### Регистрация домена проекта
+После инициализации workspace домен проекта регистрируется в памяти скриптом (dual-write в AgentDB и legacy pathfinder):
+```powershell
+python .\scripts\register-agentdb-domain.py --project "my-project" --path "C:\Projects\MyNewProject"
+```
+Домен затем указывается в `ZONE: INDEX_POINTERS` проектного `AGENTS.md` и используется как фильтр `domain` в `agentdb_search` / `agentdb_store`.
+
+---
+
 ## 🛠️ Быстрый старт
 
 ### 0. Установка бандла (один раз на машину)
-Клонируйте репозиторий в удобную папку и запустите установщик — он развернёт хук Antigravity, плагины OpenCode (включая rtk и трекер токенов), скиллы, MCP-конфиг aislop и проверит prerequisites:
+Клонируйте репозиторий в удобную папку и запустите установщик — он развернёт хук Antigravity, плагины OpenCode (включая rtk и трекер токенов), скиллы, MCP-конфиги aislop и AgentDB и проверит prerequisites:
 
 ```powershell
 git clone <url> agent-templates
@@ -111,12 +166,13 @@ cd agent-templates
 
 Что делает установщик:
 - шаг 0: проверяет git / python / node и rtk>=0.23.0 (предупреждения, не остановка);
-- копирует рантайм (scripts + tools/aislop/dist) в `~/.agent-templates` — клон после установки можно удалять или обновлять;
+- копирует рантайм (scripts + tools/aislop/dist + tools/agentdb) в `~/.agent-templates` — клон после установки можно удалять или обновлять;
+- ставит `fastmcp` для AgentDB (`pip install`, best-effort: при неудаче шаг помечается `warn`, остальное ставится);
 - дописывает команду хука `hook-pre-invocation.py` (путь на рантайм) в `~/.gemini/config/hooks.json` (ключ `workspace-auto-init`);
 - копирует `plugins/opencode/*.ts` в `~/.config/opencode/plugins/`;
 - копирует `skills/*/` (кроме `_skill_template`) в skills-директории OpenCode и Gemini;
-- merge'ит `mcp.aislop` в `~/.config/opencode/opencode.json`;
-- verify: self-test хука + сводка по всем шагам.
+- merge'ит `mcp.aislop` и `mcp.agentdb` в `~/.config/opencode/opencode.json`;
+- verify: self-test хука + проверка `tools/agentdb/server.py` в рантайме + сводка по всем шагам.
 
 ### 1. Архитектура динамических правил (`AGENTS.md` < 3.5 КБ)
 Каждый проект содержит компактный файл правил со строгим зонированием, исключающим разрастание контекста и галлюцинации:
